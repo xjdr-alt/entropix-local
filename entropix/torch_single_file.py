@@ -17,7 +17,7 @@ from pathlib import Path
 
 from entropix.tokenizer import Tokenizer
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 torch.set_float32_matmul_precision('high')
 
 DEFAULT_MASK_VALUE = -0.7 * float(torch.finfo(torch.float32).max)

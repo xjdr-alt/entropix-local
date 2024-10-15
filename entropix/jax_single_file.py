@@ -420,12 +420,43 @@ def build_attn_mask(seqlen: int, start_pos: int) -> jax.Array:
   return mask
 
 
+def estimate_flops(xfmr_weights, model_params, tokens):
+    # Create a JAX computation graph
+    def forward_pass(tokens):
+        freqs_cis = precompute_freqs_cis(model_params.head_dim, model_params.max_seq_len, model_params.rope_theta, model_params.use_scaled_rope)
+        kvcache = KVCache.new(model_params.n_layers, tokens.shape[0], model_params.max_seq_len, model_params.n_local_kv_heads, model_params.head_dim)
+        logits, _, _, _ = xfmr(xfmr_weights, model_params, tokens, 0, freqs_cis[:tokens.shape[1]], kvcache)
+        return logits
+
+    # Compile the computation
+    lowered = jax.jit(forward_pass).lower(tokens)
+    compiled = lowered.compile()
+    ca = compiled.cost_analysis()
+    flops = ca[0]['flops']
+    #rint(f'{ca=}')
+
+    return flops
+
+import time
+from functools import wraps
+
+def timer(func):
+    @wraps(func)
+    def wrapper_timer(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        end_time = time.time()
+        wrapper_timer.elapsed_time = end_time - start_time
+        return result
+    wrapper_timer.elapsed_time = 0
+    return wrapper_timer
+
 def main(weights_path: Path = Path('weights/1B-Instruct')):
   model_params = LLAMA_1B_PARAMS
   xfmr_weights = load_weights(weights_path)
   tokenizer = Tokenizer('entropix/tokenizer.model')
 
-  # Create the batch of tokens
+  @timer
   def generate(xfmr_weights, model_params, tokens):
     gen_tokens = None
     cur_pos = 0
@@ -441,6 +472,7 @@ def main(weights_path: Path = Path('weights/1B-Instruct')):
     cur_pos = seqlen
     stop = jnp.array([128001, 128008, 128009])
     sampler_cfg = SamplerConfig()
+    start_time = time.time()  # Start timer
     while cur_pos < 8192:
       cur_pos += 1
       logits, kvcache, scores, stats = xfmr(xfmr_weights, model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
@@ -450,6 +482,10 @@ def main(weights_path: Path = Path('weights/1B-Instruct')):
       print(out_token, end='', flush=True)
       if jnp.isin(next_token, stop).any():
         break
+    end_time = time.time()  # End timer
+    elapsed_time = end_time - start_time
+    print(f"\nGenerated {cur_pos} tokens in {elapsed_time:.2f} seconds ({cur_pos/elapsed_time:.2f} tok/sec).")
+    return cur_pos, elapsed_time
 
   prompt = """<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 <entropixThinking>
@@ -495,7 +531,12 @@ Think carefully in a step-by-step manner. I currently have two bananas. I ate on
 """
   print(prompt)
   tokens = tokenizer.encode(prompt,  bos=False, eos=False, allowed_special='all')
-  generate(xfmr_weights, model_params, tokens)
+  # Estimate total FLOPs
+  #total_flops = estimate_flops(xfmr_weights, model_params, jnp.array([tokens], jnp.int32))
+  #print(f"Estimated Total FLOPs for one forward pass: {total_flops}")
+
+  gen_tokens, elapsed_time = generate(xfmr_weights, model_params, tokens)
+  print(f"Tokens per Second: {gen_tokens / elapsed_time:.2f} tok/sec")
 
 if __name__ == '__main__':
   tyro.cli(main)
