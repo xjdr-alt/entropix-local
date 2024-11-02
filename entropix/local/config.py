@@ -127,13 +127,14 @@ MODEL_CONFIGS = {
 }
 
 MODEL_IDS = {
-    "3B": "meta-llama/Llama-3.2-3B-Instruct",
-    "1B": "meta-llama/Llama-3.2-1B-Instruct"
+    "1B": "meta-llama/Llama-3.2-1B-Instruct",
+    "3B": "meta-llama/Llama-3.2-3B-Instruct"
+
 }
 
 MODEL_PATHS = {
-    "3B": "entropix/data/3B",
-    "1B": "entropix/data/1B"
+    "1B": "entropix/data/1B",
+    "3B": "entropix/data/3B"
 }
 
 class ModelParams(NamedTuple):

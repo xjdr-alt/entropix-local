@@ -43,7 +43,7 @@ You can update the `.env.example` with your own token, and rename the file to `.
 Once the environment file is set and you installed and uv as above, you can invoke the model with the following:
 
 ```sh
-python3 -m entr_model_torch.main --config.prompt "Which number is larger 9.11 or 9.9? be brief in your response" --config.stream --config.debug
+python3 -m entr_model_torch.main --config.prompt "Which number is larger 9.11 or 9.9?" --config.stream --config.debug
 ```
 
 You could also batch process prompts with the following example command:
@@ -78,6 +78,6 @@ Optional:
     Usage: --config.stream or --config.no-stream
 
 Example usage:
-    python3 -m entr_model_torch.main --config.prompt "Which number is larger 9.11 or 9.9? be brief in your response" --config.stream --config.debug
+    python3 -m entr_model_torch.main --config.prompt "Which number is larger 9.11 or 9.9?" --config.stream --config.debug
     or
     python3 -m entr_model_torch.main --config.csv_file "prompts.csv" --config.no-stream --config.debug
