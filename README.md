@@ -30,7 +30,17 @@ jupyter-notebook entropix_local_torch.ipynb
 ```
 
 You could also use the model with torch directly from cli
-follow the uv instalation guide then invoke the following command in your terminal:
+**First and foremost you need to update the environment file with your own huggingface token.**
+
+Currently there are 2 environment variables available:
+```sh
+SELECTED_MODEL_SIZE = "1B" # Selections: 1B, 3B
+TOKEN = '' # Your HuggingFace token for gated model access
+```
+
+You can update the `.env.example` with your own token, and rename the file to `.env`.
+
+Once the environment file is set and you installed and uv as above, you can invoke the model with the following:
 
 ```sh
 python3 -m entr_model_torch.main --config.prompt "Which number is larger 9.11 or 9.9? be brief in your response" --config.stream --config.debug
