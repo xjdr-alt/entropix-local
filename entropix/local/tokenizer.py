@@ -1,4 +1,5 @@
 import os
+import urllib
 from logging import getLogger
 from pathlib import Path
 from typing import (
@@ -15,8 +16,41 @@ from typing import (
 )
 
 import tiktoken
-
 from tiktoken.load import load_tiktoken_bpe
+
+
+def download_tokenizer(tokenizer_url: str = "https://huggingface.co/meta-llama/Llama-3.2-1B/resolve/main/original/tokenizer.model?download=true",
+                      tokenizer_path: str = "entropix/data/tokenizer.model") -> str:
+    """
+    Downloads the tokenizer file if it doesn't exist locally.
+    
+    Args:
+        tokenizer_url (str): URL to download the tokenizer from
+        tokenizer_path (str): Local path to save the tokenizer
+        
+    Returns:
+        str: Path to the tokenizer file
+    """
+    # Create the data directory if it doesn't exist
+    os.makedirs(os.path.dirname(tokenizer_path), exist_ok=True)
+    
+    if not os.path.exists(tokenizer_path):
+        print(f"Downloading tokenizer to {tokenizer_path}...")
+        token = os.environ.get('TOKEN')
+        if not token:
+            raise ValueError("TOKEN environment variable is not set")
+            
+        request = urllib.request.Request(
+            tokenizer_url,
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        with urllib.request.urlopen(request) as response, open(tokenizer_path, 'wb') as out_file:
+          out_file.write(response.read())
+        print("Download complete.")
+    else:
+        print(f"Tokenizer already exists at {tokenizer_path}")
+    
+    return tokenizer_path
 
 logger = getLogger(__name__)
 
