@@ -15,7 +15,7 @@ import tyro
 
 from pathlib import Path
 
-from entropix.tokenizer import Tokenizer
+from entropix.local.tokenizer import Tokenizer
 
 device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
 torch.set_float32_matmul_precision('high')

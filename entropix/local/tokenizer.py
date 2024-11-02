@@ -1,4 +1,5 @@
 import os
+import urllib
 from logging import getLogger
 from pathlib import Path
 from typing import (
@@ -15,8 +16,32 @@ from typing import (
 )
 
 import tiktoken
-
 from tiktoken.load import load_tiktoken_bpe
+
+
+def download_tokenizer(tokenizer_url: str = "https://huggingface.co/HuggingFaceTB/SmolLM-360M-Instruct/resolve/main/tokenizer.json",
+                      tokenizer_path: str = "entropix/data/tokenizer.model") -> str:
+    """
+    Downloads the tokenizer file if it doesn't exist locally.
+    
+    Args:
+        tokenizer_url (str): URL to download the tokenizer from
+        tokenizer_path (str): Local path to save the tokenizer
+        
+    Returns:
+        str: Path to the tokenizer file
+    """
+    # Create the data directory if it doesn't exist
+    os.makedirs(os.path.dirname(tokenizer_path), exist_ok=True)
+    
+    if not os.path.exists(tokenizer_path):
+        print(f"Downloading tokenizer to {tokenizer_path}...")
+        urllib.request.urlretrieve(tokenizer_url, tokenizer_path)
+        print("Download complete.")
+    else:
+        print(f"Tokenizer already exists at {tokenizer_path}")
+    
+    return tokenizer_path
 
 logger = getLogger(__name__)
 

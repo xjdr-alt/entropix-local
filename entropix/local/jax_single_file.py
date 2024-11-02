@@ -13,7 +13,7 @@ import tyro
 from pathlib import Path
 from functools import partial
 
-from entropix.tokenizer import Tokenizer
+from entropix.local.tokenizer import Tokenizer
 
 
 DEFAULT_MASK_VALUE = -0.7 * float(torch.finfo(torch.float32).max)
