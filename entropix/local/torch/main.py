@@ -657,6 +657,15 @@ class EntropixModel:
 
 # Function to initialize the model (to be run once)
 def initialize_model() -> None:
+    #create the library structure
+    folders = [
+        "entropix/data",
+        "entropix/results",
+    ]
+    
+    for folder in folders:
+        Path(folder).mkdir(parents=True, exist_ok=True)
+
     load_dotenv()
     model_size = os.getenv('SELECTED_MODEL_SIZE', '1B')
     download_weights(model_size)
