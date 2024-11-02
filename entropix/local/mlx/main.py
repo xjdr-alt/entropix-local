@@ -25,7 +25,8 @@ import pandas as pd
 import csv
 
 #global inports
-from entropix.local.weights import download_weights_torch, load_weights_mx
+from entropix.local.torch_weights import download_weights_torch
+from entropix.local.mlx_weights import load_weights_mx
 from entropix.local.tokenizer import download_tokenizer, Tokenizer
 from entropix.local.config import EntropixConfig, SamplerConfig, SamplerState, GenerateConfig, MODEL_CONFIGS, get_model_params
 

@@ -3,7 +3,7 @@ import mlx.core as mx
 import mlx.nn as nn
 
 #global imports
-from entropix.local.weights import LayerWeights, XfmrWeights
+from entropix.local.mlx_weights import LayerWeights, XfmrWeights
 from entropix.local.config import ModelParams
 
 #framework specific configs

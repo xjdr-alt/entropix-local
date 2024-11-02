@@ -179,6 +179,11 @@ dependencies = [
     { name = "tyro" },
 ]
 
+[package.optional-dependencies]
+mlx = [
+    { name = "mlx" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "blobfile", specifier = ">=3.0.0" },
@@ -186,6 +191,7 @@ requires-dist = [
     { name = "jax", specifier = ">=0.4.35" },
     { name = "matplotlib", specifier = ">=3.9.2" },
     { name = "mlx", specifier = ">=0.19.3" },
+    { name = "mlx", marker = "extra == 'mlx'" },
     { name = "pandas", specifier = ">=2.2.3" },
     { name = "plotly", specifier = ">=5.24.1" },
     { name = "python-dotenv", specifier = ">=1.0.1" },

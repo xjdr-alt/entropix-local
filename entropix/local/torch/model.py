@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 #global imports
-from entropix.local.weights import LayerWeights, XfmrWeights
+from entropix.local.torch_weights import LayerWeights, XfmrWeights
 from entropix.local.config import ModelParams
 
 #framework specific configs
