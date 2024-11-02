@@ -7,9 +7,9 @@ This is the local version of the entropix sampler. Server version repo can be fo
 Clone the repo
 
 ```sh
-git clone git@github.com:SinatrasC/entropix-smollm.git
+git clone git@github.com:xjdr-alt/entropix-local.git
 
-cd entropix-smollm
+cd entropix-local
 ```
 
 ### With `uv`
