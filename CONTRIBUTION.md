@@ -2,6 +2,16 @@
 
 Thank you for contributing! This guide focuses on how to submit issues and pull requests effectively.
 
+We are currently accepting contribution to the following part of the codebase:
+- `chart`: Charting and visualisation tools
+- `ui`: Chat interface with visualisation built-in
+- `docs`: Documentation
+- `refactor`: Code refactoring
+- `chore`: Maintenance
+
+**Currently, we do not accept pull request to the sampler, torch and mlx implementations.**
+
+
 ## Submitting Issues
 
 ### Before Creating an Issue
