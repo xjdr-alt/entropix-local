@@ -8,8 +8,8 @@ import jax
 import json
 from datetime import datetime
 
-import torch
-import torch.nn.functional as F
+import mlx.core as mx
+import mlx.nn as nn
 
 import math
 
@@ -25,31 +25,19 @@ import pandas as pd
 import csv
 
 #global inports
-from entropix.local.weights import download_weights_torch, load_weights_torch
+from entropix.local.weights import download_weights_torch, load_weights_mx
 from entropix.local.tokenizer import download_tokenizer, Tokenizer
 from entropix.local.config import EntropixConfig, SamplerConfig, SamplerState, GenerateConfig, MODEL_CONFIGS, get_model_params
 
 #framework specific imports
-from entropix.local.torch.utils import precompute_freqs_cis, build_attn_mask, validate_csv
-from entropix.local.torch.kvcache import KVCache
-from entropix.local.torch.model import xfmr
-from entropix.local.torch.sampler import sample
-from entropix.local.torch.metrics import calculate_metrics
-
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-else:
-    device = torch.device("cpu")
-
-print(f"Using device: {device}")
-if device == "cuda":
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
-torch.cuda.empty_cache()
-torch.set_float32_matmul_precision('high')
+from entropix.local.mlx.utils import precompute_freqs_cis, build_attn_mask, validate_csv
+from entropix.local.mlx.kvcache import KVCache
+from entropix.local.mlx.model import xfmr
+from entropix.local.mlx.sampler import sample
+from entropix.local.mlx.metrics import calculate_metrics
 
 
+#print(f"Using device: {device}")
 
 class EntropixModel:
     def __init__(self, model_size: str = "1B"):
@@ -65,11 +53,11 @@ class EntropixModel:
         self.model_size = model_size
         self.config = MODEL_CONFIGS[model_size]
         self.model_params = get_model_params(self.config)
-        self.xfmr_weights = load_weights_torch(model_id=model_size)
+        self.xfmr_weights = load_weights_mx(model_id=model_size)
         self.tokenizer = Tokenizer('entropix/data/tokenizer.model')
         self.sampler_config = SamplerConfig(model_size)
         self.entropix_config = EntropixConfig()
-        self.generator = torch.Generator(device=device).manual_seed(1337)
+        self.rng_key =  mx.random.key(1337)
 
     def visualize_token_entropy_varentropy(self, metrics_data, generated_tokens):
         # Add check at the start of the method
@@ -318,47 +306,48 @@ class EntropixModel:
         sampler_states = []
         generated_tokens = []
 
-        with torch.inference_mode():
-            tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
-            tokens = torch.tensor([tokens], dtype=torch.long).to(device)
-            bsz, seqlen = tokens.shape
-            cur_pos = 0
-            attn_mask = build_attn_mask(seqlen, cur_pos)
-            freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
-            kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim).to(device)
 
-            logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+        tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
+        tokens = mx.array([tokens], dtype=mx.int32)
+        bsz, seqlen = tokens.shape
+        cur_pos = 0
+        attn_mask = build_attn_mask(seqlen, cur_pos)
+        freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
+        kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim)
+
+        logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
+        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
+
+        metrics = calculate_metrics(logits, scores)
+        for key in metrics_data.keys():
+            if key in metrics:
+                metrics_data[key].append(metrics[key].item())
+        sampler_states.append(sampler_state)
+
+        gen_tokens = next_token
+        output = self.tokenizer.decode([next_token.item()])
+        generated_tokens.append(next_token.item())
+        cur_pos = seqlen
+        stop = mx.array([128001, 128008, 128009], dtype=mx.int32) 
+
+        while cur_pos < max_tokens:
+            cur_pos += 1
+            logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
+            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
 
             metrics = calculate_metrics(logits, scores)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
             sampler_states.append(sampler_state)
-
-            gen_tokens = next_token
-            output = self.tokenizer.decode([next_token.item()])
+            metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
+            metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
             generated_tokens.append(next_token.item())
-            cur_pos = seqlen
-            stop = torch.tensor([128001, 128008, 128009], device=device, dtype=torch.int32)
 
-            while cur_pos < max_tokens:
-                cur_pos += 1
-                logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
-
-                metrics = calculate_metrics(logits, scores)
-                for key in metrics_data.keys():
-                    if key in metrics:
-                        metrics_data[key].append(metrics[key].item())
-                sampler_states.append(sampler_state)
-                metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
-                metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
-                generated_tokens.append(next_token.item())
-                gen_tokens = torch.cat((gen_tokens, next_token), dim=1)
-                output += self.tokenizer.decode(next_token.tolist()[0])
-                if torch.isin(next_token, stop).any():
-                    break
+            gen_tokens = mx.concatenate((gen_tokens, next_token), axis=1)
+            output += self.tokenizer.decode(next_token.tolist()[0])
+            if mx.any(mx.concatenate([next_token == stop_token for stop_token in stop])):
+                break
 
         if debug:
             #self.debug_visualize_metrics(metrics_data)
@@ -594,20 +583,42 @@ class EntropixModel:
         sampler_states = []
         generated_tokens = []
 
-        with torch.inference_mode():
-            tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
-            tokens = torch.tensor([tokens], dtype=torch.long).to(device)
-            
-            # Initial setup
-            bsz, seqlen = tokens.shape
-            cur_pos = 0
-            attn_mask = build_attn_mask(seqlen, cur_pos)
-            freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
-            kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim).to(device)
 
-            # Generate first token
-            logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+        tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
+        tokens = mx.array([tokens], dtype=mx.int32)
+        
+        # Initial setup
+        bsz, seqlen = tokens.shape
+        cur_pos = 0
+        attn_mask = build_attn_mask(seqlen, cur_pos)
+        freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
+        kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim)
+
+        # Generate first token
+        logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
+        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
+
+        # Track metrics
+        metrics = calculate_metrics(logits, scores)
+        for key in metrics_data.keys():
+            if key in metrics:
+                metrics_data[key].append(metrics[key].item())
+        sampler_states.append(sampler_state)
+        generated_tokens.append(next_token.item())
+
+        # Yield first token
+        token_text = self.tokenizer.decode([next_token.item()])
+        yield token_text
+
+        gen_tokens = next_token
+        cur_pos = seqlen
+        stop = mx.array([128001, 128008, 128009], dtype=mx.int32)
+
+        # Generate remaining tokens
+        while cur_pos < max_tokens:
+            cur_pos += 1
+            logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
+            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
 
             # Track metrics
             metrics = calculate_metrics(logits, scores)
@@ -615,39 +626,17 @@ class EntropixModel:
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
             sampler_states.append(sampler_state)
+            metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
+            metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
             generated_tokens.append(next_token.item())
 
-            # Yield first token
-            token_text = self.tokenizer.decode([next_token.item()])
+            # Update state and yield token
+            gen_tokens = mx.concatenate((gen_tokens, next_token), axis=1)
+            token_text = self.tokenizer.decode(next_token.tolist()[0])
             yield token_text
 
-            gen_tokens = next_token
-            cur_pos = seqlen
-            stop = torch.tensor([128001, 128008, 128009], device=device, dtype=torch.int32)
-
-            # Generate remaining tokens
-            while cur_pos < max_tokens:
-                cur_pos += 1
-                logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
-
-                # Track metrics
-                metrics = calculate_metrics(logits, scores)
-                for key in metrics_data.keys():
-                    if key in metrics:
-                        metrics_data[key].append(metrics[key].item())
-                sampler_states.append(sampler_state)
-                metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
-                metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
-                generated_tokens.append(next_token.item())
-
-                # Update state and yield token
-                gen_tokens = torch.cat((gen_tokens, next_token), dim=1)
-                token_text = self.tokenizer.decode(next_token.tolist()[0])
-                yield token_text
-
-                if torch.isin(next_token, stop).any():
-                    break
+            if mx.any(mx.concatenate([next_token == stop_token for stop_token in stop])):
+                break
 
         if debug and len(generated_tokens) > 0:  # Only show visualizations if we have data
             self.visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], sampler_states, generated_tokens)
@@ -671,9 +660,9 @@ def initialize_model() -> None:
     download_weights_torch(model_size)
     _ = download_tokenizer()
     jax.clear_caches()
-    torch.cuda.empty_cache()
 
     global entropix_model
+    print("You are running the MLX model. This only runs on Apple Silicon.")
 
     if model_size not in MODEL_CONFIGS:
         raise ValueError(f"Invalid model size. Choose from: {list(MODEL_CONFIGS.keys())}")
@@ -749,6 +738,5 @@ def generate_text(config: GenerateConfig) -> None:
 
 
 if __name__ == '__main__':
-    torch.cuda.empty_cache()
     initialize_model()
     tyro.cli(generate_text)
