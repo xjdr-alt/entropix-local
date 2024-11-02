@@ -25,7 +25,7 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float, top_k: int, 
     logit = logits[:, -1]
     probs = F.softmax(logit / temperature, dim=-1)
 
-    # Apply min_p sampling
+    # Apply min_p samplinga
     if min_p > 0.0:
         p_max = torch.max(probs, dim=-1, keepdim=True).values
         indices_to_remove = probs < (min_p * p_max)
@@ -132,7 +132,7 @@ def sample(gen_tokens: torch.Tensor, logits: torch.Tensor, attention_scores: tor
           (not entropix_cfg.state_extras_interaction_strength or interaction_strength < cfg.low_interaction_strength_threshold)):
         sampler_state = SamplerState.TREADING
         # Insert a clarifying question token if not already present
-        if not torch.isin(gen_tokens[:, -1], torch.tensor([clarifying_question_token], device=device, dtype=gen_tokens.dtype)).any():
+        if not torch.isin(gen_tokens[:, -1], torch.tensor([clarifying_question_token], device=device)).any():
             sampled_token = torch.tensor([[clarifying_question_token]], dtype=torch.int32, device=device)
             return sampled_token, sampler_state
         else:
@@ -229,7 +229,7 @@ def sample(gen_tokens: torch.Tensor, logits: torch.Tensor, attention_scores: tor
         )
 
         samples = []
-        for _ in range(cfg.number_of_adaptive_samples):
+        for _ in range(cfg.n_adaptive_samples):
             sample = _sample(
                 logits,
                 temperature=temperature,
@@ -265,3 +265,4 @@ def sample(gen_tokens: torch.Tensor, logits: torch.Tensor, attention_scores: tor
         best_sample_idx = torch.argmax(sample_scores)
         sampled_token = samples[best_sample_idx]
         return sampled_token, sampler_state
+    

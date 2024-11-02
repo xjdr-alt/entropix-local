@@ -1,5 +1,6 @@
 from typing import NamedTuple, Optional, Tuple
 import os
+from dotenv import load_dotenv
 
 import plotly.graph_objects as go
 import numpy as np
@@ -26,7 +27,7 @@ import csv
 #global inports
 from entropix.local.weights import download_weights, load_weights
 from entropix.local.tokenizer import download_tokenizer, Tokenizer
-from entropix.local.config import EntropixConfig, SMOLLM_360M_PARAMS, SamplerConfig, SamplerState, GenerateConfig
+from entropix.local.config import EntropixConfig, SamplerConfig, SamplerState, GenerateConfig, MODEL_CONFIGS, get_model_params
 
 #framework specific imports
 from entropix.local.torch.utils import precompute_freqs_cis, build_attn_mask, validate_csv
@@ -43,18 +44,30 @@ else:
     device = torch.device("cpu")
 
 print(f"Using device: {device}")
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+if device == "cuda":
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 torch.cuda.empty_cache()
 torch.set_float32_matmul_precision('high')
 
 
 
 class EntropixModel:
-    def __init__(self):
-        self.model_params = SMOLLM_360M_PARAMS
-        self.xfmr_weights = load_weights()
+    def __init__(self, model_size: str = "1B"):
+        """
+        Initialize EntropixModel with specified model size.
+
+        Args:
+            model_size: One of "1B", or "3B"
+        """
+        if model_size not in MODEL_CONFIGS:
+            raise ValueError(f"Invalid model size. Choose from: {list(MODEL_CONFIGS.keys())}")
+
+        self.model_size = model_size
+        self.config = MODEL_CONFIGS[model_size]
+        self.model_params = get_model_params(self.config)
+        self.xfmr_weights = load_weights(model_id=model_size)
         self.tokenizer = Tokenizer('entropix/data/tokenizer.model')
-        self.sampler_config = SamplerConfig()
+        self.sampler_config = SamplerConfig(model_size)
         self.entropix_config = EntropixConfig()
         self.generator = torch.Generator(device=device).manual_seed(1337)
 
@@ -251,7 +264,7 @@ class EntropixModel:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
         # Save the interactive plot as HTML
-        interactive_filename = f"token_entropy_visualization_{timestamp}.html"
+        interactive_filename = f"entropix/results/token_entropy_visualization_{timestamp}.html"
         fig.write_html(interactive_filename, include_plotlyjs=True, full_html=True)
         print(f"3D token entropy visualization saved to {interactive_filename}")
 
@@ -287,7 +300,7 @@ class EntropixModel:
         }
 
         # Save the data to a file using the same timestamp
-        data_filename = f"entropy_data_{timestamp}.json"
+        data_filename = f"entropix/results/entropy_data_{timestamp}.json"
         with open(data_filename, 'w') as f:
             json.dump(export_data, f, indent=2)
         print(f"Data exported to {data_filename}")
@@ -327,7 +340,7 @@ class EntropixModel:
             output = self.tokenizer.decode([next_token.item()])
             generated_tokens.append(next_token.item())
             cur_pos = seqlen
-            stop = torch.tensor([0, 2], device=device, dtype=torch.int32)
+            stop = torch.tensor([128001, 128008, 128009], device=device, dtype=torch.int32)
 
             while cur_pos < max_tokens:
                 cur_pos += 1
@@ -386,7 +399,7 @@ class EntropixModel:
             axs[2, 1].grid(True)
 
         plt.tight_layout()
-        plt.show()
+        #plt.show()
 
     def visualize_sampler_metrics(self, entropies, varentropies, sampler_states, generated_tokens):
         # Create a plotly figure with subplots
@@ -554,7 +567,7 @@ class EntropixModel:
         
         # Generate timestamp and save
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"sampler_metrics_{timestamp}.html"
+        filename = f"entropix/results/sampler_metrics_{timestamp}.html"
         fig.write_html(filename, include_plotlyjs=True, full_html=True)
         print(f"Sampler metrics visualization saved to {filename}")
         
@@ -610,7 +623,7 @@ class EntropixModel:
 
             gen_tokens = next_token
             cur_pos = seqlen
-            stop = torch.tensor([0, 2], device=device, dtype=torch.int32)
+            stop = torch.tensor([128001, 128008, 128009], device=device, dtype=torch.int32)
 
             # Generate remaining tokens
             while cur_pos < max_tokens:
@@ -639,18 +652,25 @@ class EntropixModel:
         if debug and len(generated_tokens) > 0:  # Only show visualizations if we have data
             self.visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], sampler_states, generated_tokens)
             fig = self.visualize_token_entropy_varentropy(metrics_data, generated_tokens)
-            if not batch:
-                fig.show()
+            # if not batch:
+            #     fig.show()
 
 # Function to initialize the model (to be run once)
-def initialize_model():
-    download_weights()
+def initialize_model() -> None:
+    load_dotenv()
+    model_size = os.getenv('SELECTED_MODEL_SIZE', '1B')
+    download_weights(model_size)
     _ = download_tokenizer()
     jax.clear_caches()
     torch.cuda.empty_cache()
+
     global entropix_model
-    entropix_model = EntropixModel()
-    print("Model initialized and ready to use!")
+
+    if model_size not in MODEL_CONFIGS:
+        raise ValueError(f"Invalid model size. Choose from: {list(MODEL_CONFIGS.keys())}")
+    print(f"Initializing {model_size} model...")
+    entropix_model = EntropixModel(model_size)
+    print(f"{model_size} model initialized and ready to use!")
 
 # Function to generate text (can be used in multiple cells)
 def generate_text(config: GenerateConfig) -> None:
@@ -666,17 +686,18 @@ def generate_text(config: GenerateConfig) -> None:
 
     # Handle CSV input if provided
     if config.csv_file:
-        if not validate_csv(config.csv_file):
+        csv_path = "entropix/prompts/" + config.csv_file
+        if not validate_csv(csv_path):
             return
-            
-        df = pd.read_csv(config.csv_file)
+        
+        df = pd.read_csv(csv_path)
         total_prompts = len(df)
         
         print(f"Processing {total_prompts} prompts from CSV file...")
         
         # Create output CSV file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = f"generated_responses_{timestamp}.csv"
+        output_file = f"entropix/results/generated_responses_{timestamp}.csv"
         
         with open(output_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)

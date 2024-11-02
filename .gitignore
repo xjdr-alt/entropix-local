@@ -159,3 +159,4 @@ cython_debug/
 #entropix specific
 /entropix/data
 /entropix/results
+.env

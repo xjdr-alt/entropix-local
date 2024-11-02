@@ -72,35 +72,69 @@ class EntropixConfig:
     def __init__(self):
         # Sampler state toggles
         ## Low Entropy, Low Varentropy: "flowing with unspoken intent"
-        self.state_flowing = True
+        self.state_flowing = False
         ## High Entropy, Low Varentropy: "treading carefully, asking clarifying questions"
-        self.state_treading = True
+        self.state_treading = False
         ## Low Entropy, High Varentropy: "exploring forks in the path"
-        self.state_exploring = True
+        self.state_exploring = False
         ## High Entropy, High Varentropy: "resampling in the mist"
-        self.state_resampling = True
+        self.state_resampling = False
 
-        # Sampler state extras
+        # Extra sampler state toggles for advanced testing
         self.state_extras_agreement = False
         self.state_extras_interaction_strength = False
 
-        # Adaptive state dynamic top_p, top_k, min_p adjustment toggles (old)
-        '''self.state_dynamic_top_p = True
-        self.state_dynamic_top_k = True
-        self.state_dynamic_min_p = True'''
+@dataclass
+class ModelConfig:
+    """Configuration class for model parameters."""
+    dim: int
+    n_layers: int
+    n_heads: int
+    n_kv_heads: int
+    vocab_size: int
+    norm_eps: float
+    rope_theta: float
+    use_scaled_rope: bool
+    max_seq_len: int
+    model_size: str
 
-params = {
-    "dim": 960,
-    "n_layers": 32,
-    "n_heads": 15,
-    "n_kv_heads": 5,
-    "vocab_size": 49152,
-    "norm_eps": 1e-05,
-    "rope_theta": 10000.0,
-    "use_scaled_rope": False,  # Inferred from "rope_scaling": null
-    "max_seq_len": 2048,  # Inferred from "max_position_embeddings"
+# Define configurations for different models and model sizes
+MODEL_CONFIGS = {
+    "3B": ModelConfig(
+        dim=3072,
+        n_layers=28,
+        n_heads=24,
+        n_kv_heads=8,
+        vocab_size=128256,
+        norm_eps=1e-05,
+        rope_theta=500000.0,
+        use_scaled_rope=True,
+        max_seq_len=8192,
+        model_size="3B"
+    ),
+    "1B": ModelConfig(
+        dim=2048,
+        n_layers=16,
+        n_heads=32,
+        n_kv_heads=8,
+        vocab_size=128256,
+        norm_eps=1e-05,
+        rope_theta=500000.0,
+        use_scaled_rope=True,
+        max_seq_len=4096,
+        model_size="1B"
+    )
 }
 
+MODEL_IDS = {
+    "3B": "meta-llama/Llama-3.2-3B-Instruct",
+    "1B": "meta-llama/Llama-3.2-1B-Instruct"
+}
+
+MODEL_PATHS = {
+    "3B": "entropix/data/3B",
+    "1B": "entropix/data/1B"
+}
 
 class ModelParams(NamedTuple):
   n_layers: int
@@ -111,84 +145,151 @@ class ModelParams(NamedTuple):
   rope_theta: float
   use_scaled_rope: bool
 
-MODEL_ID = 'HuggingFaceTB/SmolLM-360M-Instruct'
-MODEL_PATH = 'weights/360M-Instruct'
+MODEL_IDS = {
+    "3B": "meta-llama/Llama-3.2-3B-Instruct",
+    "1B": "meta-llama/Llama-3.2-1B-Instruct"
+}
 
-SMOLLM_360M_PARAMS = ModelParams(
-  n_layers=params["n_layers"],
-  n_local_heads=params["n_heads"],
-  n_local_kv_heads=params["n_kv_heads"],
-  head_dim=params["dim"] // params["n_heads"],
-  max_seq_len=params["max_seq_len"],
-  rope_theta=params["rope_theta"],
-  use_scaled_rope=params["use_scaled_rope"]
-)
+def get_model_params(config: ModelConfig) -> ModelParams:
+    """Create ModelParams from config."""
+    return ModelParams(
+        n_layers=config.n_layers,
+        n_local_heads=config.n_heads,
+        n_local_kv_heads=config.n_kv_heads,
+        head_dim=config.dim // config.n_heads,
+        max_seq_len=config.max_seq_len,
+        rope_theta=config.rope_theta,
+        use_scaled_rope=config.use_scaled_rope
+    )
 
 # Experimental custom config to trigger different sampler states
 class SamplerConfig:
-    def __init__(self):
-        # Sampling Hyperparameters
-        self.temperature: float = 0.666
-        self.top_p: float = 0.90
-        self.top_k: int = 27
-        self.min_p: float = 0.03
+    def __init__(self, model_size: str = "1B"):
+        """
+        Initialize SamplerConfig with specified model size.
 
-        # Logits Entropy Thresholds
-        self.low_logits_entropy_threshold: float = 0.01
-        self.medium_logits_entropy_threshold: float = 0.7
-        self.high_logits_entropy_threshold: float = 2.1
+        Args:
+            model_size: One of "1B", or "3B"
+        """
+        self.model_size = model_size  # Store model_size as instance variable
 
-        # Logits Varentropy Thresholds
-        self.low_logits_varentropy_threshold: float = 0.05
-        self.medium_logits_varentropy_threshold: float = 2.0
-        self.high_logits_varentropy_threshold: float = 5.8
+        if self.model_size == "1B":
+            """
+            Configuration for the sampling strategy, including threshold values for various metrics
+            and adaptive sampling parameters.
+            """
+            self.temperature = 0.666
+            self.top_p = 0.90
+            self.top_k = 27
+            self.min_p = 0.03
 
-        # Attention Entropy Thresholds
-        self.low_attention_entropy_threshold: float = 11.915
-        self.medium_attention_entropy_threshold: float = 11.921
-        self.high_attention_entropy_threshold: float = 11.926
+            self.low_logits_entropy_threshold = 0.01
+            self.medium_logits_entropy_threshold = 0.7
+            self.high_logits_entropy_threshold = 2.1
 
-        # Attention Varentropy Thresholds
-        self.low_attention_varentropy_threshold: float = 0.001
-        self.medium_attention_varentropy_threshold: float = 0.0045
-        self.high_attention_varentropy_threshold: float = 0.009
+            self.low_logits_varentropy_threshold = 0.05
+            self.medium_logits_varentropy_threshold = 2.0
+            self.high_logits_varentropy_threshold = 5.8
 
-        # Agreement Thresholds
-        self.low_agreement_threshold: float = 2e-06
-        self.medium_agreement_threshold: float = 4e-06
-        self.high_agreement_threshold: float = 5e-06
+            self.low_attention_entropy_threshold = 11.915
+            self.medium_attention_entropy_threshold = 11.921
+            self.high_attention_entropy_threshold = 11.926
 
-        # Interaction Strength Thresholds
-        self.low_interaction_strength_threshold: float = 0.2
-        self.medium_interaction_strength_threshold: float = 0.247
-        self.high_interaction_strength_threshold: float = 0.264
+            self.low_attention_varentropy_threshold = 0.001
+            self.medium_attention_varentropy_threshold = 0.0045
+            self.high_attention_varentropy_threshold = 0.009
 
-        # Offsets and Coefficients for Adjusting Sampling Parameters
-        self.high_entropy_attention_offset: float = 1.3
-        self.high_entropy_attention_coefficient: float = 0.2
+            self.low_agreement_threshold = 1.8e-06
+            self.medium_agreement_threshold = 3.8e-06
+            self.high_agreement_threshold = 4.8e-06
 
-        self.low_entropy_interaction_strength_offset: float = 1.2
-        self.low_entropy_interaction_strength_coefficient: float = 0.3
+            self.low_interaction_strength_threshold = 0.18
+            self.medium_interaction_strength_threshold = 0.227
+            self.high_interaction_strength_threshold = 0.244
 
-        self.high_entropy_varentropy_attention_offset: float = 2.0
-        self.high_entropy_varentropy_attention_coefficient: float = 0.5
+            self.high_entropy_attention_offset = 1.3
+            self.high_entropy_attention_coefficient = 0.2
 
-        # Adaptive Sampling Parameters
-        self.number_of_adaptive_samples: int = 5
+            self.low_entropy_interaction_strength_offset = 1.2
+            self.low_entropy_interaction_strength_coefficient = 0.3
 
-        self.adaptive_temperature_logits_coefficient: float = 0.3
-        self.adaptive_temperature_attention_coefficient: float = 0.2
-        self.adaptive_temperature_agreement_coefficient: float = 0.2
-        self.adaptive_top_p_coefficient: float = 0.1
-        self.adaptive_top_k_interaction_coefficient: float = 0.3
-        self.adaptive_top_k_agreement_coefficient: float = 0.2
-        self.adaptive_min_p_coefficient: float = 0.5
-        self.adaptive_score_logits_entropy_coefficient: float = 0.1
-        self.adaptive_score_attention_entropy_coefficient: float = 0.2
-        self.adaptive_score_logits_varentropy_coefficient: float = 0.3
-        self.adaptive_score_attention_varentropy_coefficient: float = 0.4
-        self.adaptive_score_agreement_coefficient: float = 0.5
-        self.adaptive_score_interaction_strength_coefficient: float = 0.6
+            self.high_entropy_varentropy_attention_offset = 2.0
+            self.high_entropy_varentropy_attention_coefficient = 0.5
+
+            self.n_adaptive_samples = 5
+
+            self.adaptive_temperature_logits_coefficient = 0.3
+            self.adaptive_temperature_attention_coefficient = 0.2
+            self.adaptive_temperature_agreement_coefficient = 0.2
+            self.adaptive_top_p_coefficient = 0.1
+            self.adaptive_top_k_interaction_coefficient = 0.3
+            self.adaptive_top_k_agreement_coefficient = 0.2
+            self.adaptive_min_p_coefficient = 0.5
+            self.adaptive_score_logits_entropy_coefficient = 0.1
+            self.adaptive_score_attention_entropy_coefficient = 0.2
+            self.adaptive_score_logits_varentropy_coefficient = 0.3
+            self.adaptive_score_attention_varentropy_coefficient = 0.4
+            self.adaptive_score_agreement_coefficient = 0.5
+            self.adaptive_score_interaction_strength_coefficient = 0.6
+
+
+        elif self.model_size == "3B":
+            self.temperature = 0.666
+            self.top_p = 0.90
+            self.top_k = 27
+            self.min_p = 0.03
+
+            self.low_logits_entropy_threshold = 0.01
+            self.medium_logits_entropy_threshold = 0.7
+            self.high_logits_entropy_threshold = 2.1
+
+            self.low_logits_varentropy_threshold = 0.05
+            self.medium_logits_varentropy_threshold = 2.0
+            self.high_logits_varentropy_threshold = 5.8
+
+            self.low_attention_entropy_threshold = 11.915
+            self.medium_attention_entropy_threshold = 11.921
+            self.high_attention_entropy_threshold = 11.926
+
+            self.low_attention_varentropy_threshold = 0.001
+            self.medium_attention_varentropy_threshold = 0.0045
+            self.high_attention_varentropy_threshold = 0.009
+
+            self.low_agreement_threshold = 1.8e-06
+            self.medium_agreement_threshold = 3.8e-06
+            self.high_agreement_threshold = 4.8e-06
+
+            self.low_interaction_strength_threshold = 0.18
+            self.medium_interaction_strength_threshold = 0.227
+            self.high_interaction_strength_threshold = 0.244
+
+            self.high_entropy_attention_offset = 1.3
+            self.high_entropy_attention_coefficient = 0.2
+
+            self.low_entropy_interaction_strength_offset = 1.2
+            self.low_entropy_interaction_strength_coefficient = 0.3
+
+            self.high_entropy_varentropy_attention_offset = 2.0
+            self.high_entropy_varentropy_attention_coefficient = 0.5
+
+            self.n_adaptive_samples = 5
+
+            self.adaptive_temperature_logits_coefficient = 0.3
+            self.adaptive_temperature_attention_coefficient = 0.2
+            self.adaptive_temperature_agreement_coefficient = 0.2
+            self.adaptive_top_p_coefficient = 0.1
+            self.adaptive_top_k_interaction_coefficient = 0.3
+            self.adaptive_top_k_agreement_coefficient = 0.2
+            self.adaptive_min_p_coefficient = 0.5
+            self.adaptive_score_logits_entropy_coefficient = 0.1
+            self.adaptive_score_attention_entropy_coefficient = 0.2
+            self.adaptive_score_logits_varentropy_coefficient = 0.3
+            self.adaptive_score_attention_varentropy_coefficient = 0.4
+            self.adaptive_score_agreement_coefficient = 0.5
+            self.adaptive_score_interaction_strength_coefficient = 0.6
+
+        else:
+            raise ValueError(f"Invalid model size: {model_size}. Choose from: 1B, 3B")
 
 class SamplerState(Enum):
     FLOWING = "Flowing with unspoken intent"

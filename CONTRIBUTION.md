@@ -9,7 +9,7 @@ We are currently accepting contribution to the following part of the codebase:
 - `refactor`: Code refactoring
 - `chore`: Maintenance
 
-**Currently, we do not accept pull request to the sampler, torch and mlx implementations.**
+**Currently, we are not accepting pull request to the sampler, torch and mlx implementations.**
 
 
 ## Submitting Issues

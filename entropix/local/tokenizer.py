@@ -19,7 +19,7 @@ import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 
 
-def download_tokenizer(tokenizer_url: str = "https://huggingface.co/HuggingFaceTB/SmolLM-360M-Instruct/resolve/main/tokenizer.json",
+def download_tokenizer(tokenizer_url: str = "https://huggingface.co/meta-llama/Llama-3.2-1B/resolve/main/original/tokenizer.model?download=true",
                       tokenizer_path: str = "entropix/data/tokenizer.model") -> str:
     """
     Downloads the tokenizer file if it doesn't exist locally.
@@ -36,7 +36,16 @@ def download_tokenizer(tokenizer_url: str = "https://huggingface.co/HuggingFaceT
     
     if not os.path.exists(tokenizer_path):
         print(f"Downloading tokenizer to {tokenizer_path}...")
-        urllib.request.urlretrieve(tokenizer_url, tokenizer_path)
+        token = os.environ.get('TOKEN')
+        if not token:
+            raise ValueError("TOKEN environment variable is not set")
+            
+        request = urllib.request.Request(
+            tokenizer_url,
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        with urllib.request.urlopen(request) as response, open(tokenizer_path, 'wb') as out_file:
+          out_file.write(response.read())
         print("Download complete.")
     else:
         print(f"Tokenizer already exists at {tokenizer_path}")
