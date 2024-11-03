@@ -40,7 +40,7 @@ def calculate_metrics(logits: torch.Tensor, attention_scores: torch.Tensor, curr
     """Calculate various metrics from logits and attention scores with causal masking."""
     logits_entropy, logits_varentropy = calculate_varentropy_logsoftmax(logits)
     attn_entropy, attn_varentropy, attention_probs = calculate_attention_varentropy(attention_scores, current_pos)
-    mean_attention = torch.sum(attention_probs, dim=1)
+    mean_attention = torch.mean(attention_probs, dim=1)
     agreement = torch.mean(torch.abs(attention_probs - mean_attention.unsqueeze(1)), dim=(1, 2))
     interaction_strength = torch.mean(torch.abs(attention_scores), dim=(1, 2, 3))
 
