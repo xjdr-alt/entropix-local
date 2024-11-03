@@ -41,44 +41,32 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
     return xq_out.to(dtype), xk_out.to(dtype)
 
 def attention(x: torch.Tensor, layer_weights: LayerWeights, model_params, cur_pos: int, layer_idx: int, freqs_cis: torch.Tensor, kvcache: KVCache, attn_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, KVCache, torch.Tensor]:
-    # Check if x is 2D or 3D and adjust accordingly
-    if x.dim() == 2:
-        bsz = 1
-        seq_len, dim = x.shape
-        x = x.unsqueeze(0)  # Add batch dimension
-    else:
-        bsz, seq_len, dim = x.shape
-
+    bsz, _, _ = x.shape
     n_rep = model_params.n_local_heads // model_params.n_local_kv_heads
-    xq = F.linear(x, layer_weights.wq).view(bsz, seq_len, model_params.n_local_heads, model_params.head_dim)
-    xk = F.linear(x, layer_weights.wk).view(bsz, seq_len, model_params.n_local_kv_heads, model_params.head_dim)
-    xv = F.linear(x, layer_weights.wv).view(bsz, seq_len, model_params.n_local_kv_heads, model_params.head_dim)
-    xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=xq.dtype)
+    xq = F.linear(x, layer_weights.wq).reshape(bsz, -1, model_params.n_local_heads, model_params.head_dim)
+    xk = F.linear(x, layer_weights.wk).reshape(bsz, -1, model_params.n_local_kv_heads, model_params.head_dim)
+    xv = F.linear(x, layer_weights.wv).reshape(bsz, -1, model_params.n_local_kv_heads, model_params.head_dim)
+    xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
     keys, values, kvcache = kvcache.update(xk, xv, layer_idx, cur_pos, n_rep)
-    xq = xq.permute(0, 2, 1, 3)  # (bs, n_heads, seqlen, head_dim)
-    keys = keys.permute(0, 2, 3, 1)  # (bs, n_heads, head_dim, cache_len + seqlen)
-    values = values.permute(0, 2, 1, 3)  # (bs, n_heads, cache_len + seqlen, head_dim)
-    scores = torch.matmul(xq, keys)
+    xq = torch.permute(xq, (0, 2, 1, 3))  # (bs, n_heads, seqlen, head_dim)
+    keys = torch.permute(keys, (0, 2, 3, 1))  # (bs, n_heads, head_dim, cache_len + seqlen)
+    values = torch.permute(values, (0, 2, 1, 3))  # (bs, n_heads, cache_len + seqlen, head_dim)
+    scores = torch.matmul(xq, keys.to(xq.dtype))
     pre_scores = scores / math.sqrt(model_params.head_dim)
     scores = pre_scores.to(torch.float32)  # Always do attention softmax at float32
     if cur_pos == 0:
         scores = scores + attn_mask
     mask = torch.where(scores != 0.0, scores, DEFAULT_MASK_VALUE)
     padded_logits = torch.where((mask >= DEFAULT_MASK_VALUE * 0.5), scores, DEFAULT_MASK_VALUE)
-    scores = F.softmax(padded_logits, dim=-1).to(x.dtype)
-    output = torch.matmul(scores.to(values.dtype), values)
-    output = output.transpose(1, 2).contiguous().view(bsz, seq_len, -1)
+    scores = F.softmax(padded_logits, dim=-1)
+    output = torch.matmul(scores.to(torch.float32), values.to(torch.float32))
+    output = output.transpose(1, 2).reshape(xq.shape[0], xq.shape[2], -1).to(x.dtype)
     out = F.linear(output, layer_weights.wo)
-
-    # If input was 2D, remove the batch dimension from the output
-    if x.dim() == 2:
-        out = out.squeeze(0)
-
     return out, kvcache, pre_scores
 
 def feed_forward(x: torch.Tensor, layer_weights: LayerWeights) -> torch.Tensor:
  return F.linear(F.silu(F.linear(x, layer_weights.w1)) * F.linear(x, layer_weights.w3), layer_weights.w2)
-
+ 
 def xfmr(xfmr_weights: XfmrWeights, model_params: ModelParams, tokens: torch.Tensor, cur_pos: int, freqs_cis: torch.Tensor, kvcache: KVCache, attn_mask: Optional[torch.Tensor]=None) -> Tuple[torch.Tensor, KVCache, torch.Tensor, AttnStats]:
     h = xfmr_weights.tok_embeddings[tokens]
     attn_stats = AttnStats.new(
