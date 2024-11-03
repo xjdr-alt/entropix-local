@@ -63,9 +63,9 @@ Optional:
     Usage: --config.stream or --config.no-stream
 
 Example usage:
-    python3 -m entr_model_torch.main --config.prompt "Which number is larger 9.11 or 9.9? be brief in your response" --config.no-stream --config.debug
+    python3 -m entropix.local.torch.main --config.prompt "Which number is larger 9.11 or 9.9? be brief in your response" --config.no-stream --config.debug
     or
-    python3 -m entr_model_torch.main --config.csv_file "prompts.csv" --config.stream --config.debug
+    python3 -m entropix.local.torch.main --config.csv_file "prompts.csv" --config.stream --config.debug
 """
 
 class EntropixConfig:
