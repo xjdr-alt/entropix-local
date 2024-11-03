@@ -1,16 +1,21 @@
 import os
-from typing import List, NamedTuple, Optional
-from pathlib import Path
+from typing import List, NamedTuple, Optional, Dict
 
 import torch
 import ml_dtypes
 import jax.numpy as jnp
 import numpy as np
-from transformers import AutoModelForCausalLM
-from transformers.dynamic_module_utils import get_imports
-from unittest.mock import patch
+from pathlib import Path
+import ml_dtypes
+import mlx.core as mx
 
+from transformers import AutoModelForCausalLM
+from unittest.mock import patch
+from transformers.dynamic_module_utils import get_imports
+
+#global imports
 from entropix.local.config import MODEL_PATHS, MODEL_IDS, MODEL_CONFIGS, ModelConfig
+
 
 def translate_key(in_key: str):
     out_key = in_key.replace('.weight', '')
@@ -108,6 +113,7 @@ def download_weights_torch(model_id: str, out_dir: Optional[Path] = None):
         with torch.no_grad():
             state_dict = hf_model.state_dict()
             for hf_name, param in state_dict.items():
+                #print(f' {hf_name}: {param.shape=}')
                 name = translate_key(hf_name)
 
                 # Apply reverse permute for attention weights
@@ -119,6 +125,7 @@ def download_weights_torch(model_id: str, out_dir: Optional[Path] = None):
                 # Convert to bfloat16 and save
                 bf16_np_out = param.cpu().view(dtype=torch.uint16).numpy().view(ml_dtypes.bfloat16)
                 bf16_out = jnp.asarray(bf16_np_out, dtype=jnp.bfloat16).reshape(*param.shape)
+                #print(f'Writing {hf_name} as {name} to {out_dir}/{name}.npy')
                 jnp.save(f'{out_dir}/{name}.npy', bf16_out)
 
     # Cleanup
@@ -126,31 +133,24 @@ def download_weights_torch(model_id: str, out_dir: Optional[Path] = None):
     del state_dict
 
 class LayerWeights(NamedTuple):
-    wq: torch.Tensor
-    wk: torch.Tensor
-    wv: torch.Tensor
-    wo: torch.Tensor
-    w1: torch.Tensor
-    w2: torch.Tensor
-    w3: torch.Tensor
-    ffn_norm: torch.Tensor
-    attention_norm: torch.Tensor
+    wq: mx.array
+    wk: mx.array
+    wv: mx.array
+    wo: mx.array
+    w1: mx.array
+    w2: mx.array
+    w3: mx.array
+    ffn_norm: mx.array
+    attention_norm: mx.array
 
 class XfmrWeights(NamedTuple):
-    tok_embeddings: torch.Tensor
-    norm: torch.Tensor
-    output: torch.Tensor
+    tok_embeddings: mx.array
+    norm: mx.array
+    output: mx.array
     layer_weights: List[LayerWeights]
 
-def get_torch_device():
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    elif torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
-
-def load_weights_torch(model_id: str, ckpt_dir: Optional[Path] = None) -> XfmrWeights:
-    """Load weights in PyTorch format."""
+def load_weights_mx(model_id: str, ckpt_dir: Optional[Path] = None) -> XfmrWeights:
+    """Load weights in MLX format."""
     if model_id not in MODEL_PATHS:
         raise ValueError(f"Invalid model size. Choose from: {list(MODEL_PATHS.keys())}")
     ckpt_dir = Path(MODEL_PATHS[model_id])
@@ -158,32 +158,31 @@ def load_weights_torch(model_id: str, ckpt_dir: Optional[Path] = None) -> XfmrWe
     n_layers = config.n_layers
     w = {}
     layer_weights = []
-    device = get_torch_device()
     
-    with torch.inference_mode():
-        for file in ckpt_dir.glob("*.npy"):
-            name = '.'.join(str(file).split('/')[-1].split('.')[:-1])
-            jax_weight = jnp.load(file=file, mmap_mode='r', allow_pickle=True)
-            np_weight = np.array(jax_weight).astype(np.float32)
-            weight = torch.from_numpy(np_weight).to(torch.bfloat16).to(device)
-            w[name] = weight
+    for file in ckpt_dir.glob("*.npy"):
+        name = '.'.join(str(file).split('/')[-1].split('.')[:-1])
 
-        for i in range(n_layers):
-            layer_weights.append(LayerWeights(
-                wq=w[f'layers.{i}.attention.wq.weight'],
-                wk=w[f'layers.{i}.attention.wk.weight'],
-                wv=w[f'layers.{i}.attention.wv.weight'],
-                wo=w[f'layers.{i}.attention.wo.weight'],
-                w1=w[f'layers.{i}.feed_forward.w1.weight'],
-                w2=w[f'layers.{i}.feed_forward.w2.weight'],
-                w3=w[f'layers.{i}.feed_forward.w3.weight'],
-                ffn_norm=w[f'layers.{i}.ffn_norm.weight'],
-                attention_norm=w[f'layers.{i}.attention_norm.weight'],
-            ))
+        jax_weight = jnp.load(file=file, mmap_mode='r', allow_pickle=True)
+        np_weight = np.array(jax_weight).astype(np.float32)
+        weight = mx.array(np_weight, dtype=mx.bfloat16)
+        w[name] = weight
 
-        return XfmrWeights(
-            tok_embeddings=w['tok_embeddings.weight'],
-            norm=w['norm.weight'],
-            output=w['output.weight'],
-            layer_weights=layer_weights
-        )
+    for i in range(n_layers):
+        layer_weights.append(LayerWeights(
+            wq=w[f'layers.{i}.attention.wq.weight'],
+            wk=w[f'layers.{i}.attention.wk.weight'],
+            wv=w[f'layers.{i}.attention.wv.weight'],
+            wo=w[f'layers.{i}.attention.wo.weight'],
+            w1=w[f'layers.{i}.feed_forward.w1.weight'],
+            w2=w[f'layers.{i}.feed_forward.w2.weight'],
+            w3=w[f'layers.{i}.feed_forward.w3.weight'],
+            ffn_norm=w[f'layers.{i}.ffn_norm.weight'],
+            attention_norm=w[f'layers.{i}.attention_norm.weight'],
+        ))
+
+    return XfmrWeights(
+        tok_embeddings=w['tok_embeddings.weight'],
+        norm=w['norm.weight'],
+        output=w['output.weight'],
+        layer_weights=layer_weights
+    )
