@@ -11,6 +11,22 @@ else:
     device = torch.device("cpu")
 
 LN_2 = 0.69314718056 
+DEFAULT_MASK_VALUE = -1e9
+
+def calculate_attention_varentropy(attention_scores: torch.Tensor, current_pos: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Calculate the entropy and varentropy of attention probabilities with causal masking."""
+    seq_length = attention_scores.shape[-1]
+    device = attention_scores.device
+    mask = torch.arange(seq_length, device=device) >= current_pos
+    mask = mask.reshape(1, 1, 1, -1)
+    attention_scores = torch.where(mask, torch.tensor(DEFAULT_MASK_VALUE, device=attention_scores.device), attention_scores)
+    
+    attention_probs = F.softmax(attention_scores, dim=-1)
+    attention_probs_clamped = torch.clamp(attention_probs, 1e-10, 1.0)
+    entropy = -torch.sum(attention_probs * torch.log2(attention_probs_clamped), dim=-1)
+    varentropy = torch.sum(attention_probs * (torch.log2(attention_probs_clamped) + entropy.unsqueeze(-1))**2, dim=-1)
+    
+    return entropy, varentropy, attention_probs
 
 def calculate_varentropy_logsoftmax(logits: torch.Tensor, axis: int = -1) -> Tuple[torch.Tensor, torch.Tensor]:
     """Calculate the entropy and varentropy of the probability distribution using logsoftmax."""
@@ -20,21 +36,17 @@ def calculate_varentropy_logsoftmax(logits: torch.Tensor, axis: int = -1) -> Tup
     varentropy = torch.sum(probs * (log_probs / LN_2 + entropy.unsqueeze(-1))**2, dim=axis)
     return entropy, varentropy
 
-def calculate_metrics(logits: torch.Tensor, attention_scores: torch.Tensor) -> Dict[str, torch.Tensor]:
-    entropy, varentropy = calculate_varentropy_logsoftmax(logits)
-    attention_probs = F.softmax(attention_scores, dim=-1)
-    attn_entropy = -torch.sum(attention_probs * torch.log2(torch.clamp(attention_probs, 1e-10, 1.0)), dim=-1)
-    attn_varentropy = torch.var(attn_entropy, dim=1)
-
-    attn_varentropy = torch.where(torch.isnan(attn_varentropy), torch.zeros_like(attn_varentropy), attn_varentropy)
-    mean_attention = torch.mean(attention_probs, dim=1)
+def calculate_metrics(logits: torch.Tensor, attention_scores: torch.Tensor, current_pos: torch.Tensor) -> Dict[str, torch.Tensor]:
+    """Calculate various metrics from logits and attention scores with causal masking."""
+    logits_entropy, logits_varentropy = calculate_varentropy_logsoftmax(logits)
+    attn_entropy, attn_varentropy, attention_probs = calculate_attention_varentropy(attention_scores, current_pos)
+    mean_attention = torch.sum(attention_probs, dim=1)
     agreement = torch.mean(torch.abs(attention_probs - mean_attention.unsqueeze(1)), dim=(1, 2))
-
     interaction_strength = torch.mean(torch.abs(attention_scores), dim=(1, 2, 3))
 
     return {
-        "logits_entropy": torch.mean(entropy),
-        "logits_varentropy": torch.mean(varentropy),
+        "logits_entropy": torch.mean(logits_entropy),
+        "logits_varentropy": torch.mean(logits_varentropy),
         "attn_entropy": torch.mean(attn_entropy),
         "attn_varentropy": torch.mean(attn_varentropy),
         "agreement": torch.mean(agreement),

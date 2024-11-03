@@ -25,7 +25,7 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float, top_k: int, 
     logit = logits[:, -1]
     probs = F.softmax(logit / temperature, dim=-1)
 
-    # Apply min_p samplinga
+    # Apply min_p sampling
     if min_p > 0.0:
         p_max = torch.max(probs, dim=-1, keepdim=True).values
         indices_to_remove = probs < (min_p * p_max)
@@ -104,9 +104,9 @@ def adaptive_sample(logits: torch.Tensor, temperature: float, epsilon: float = 0
 
     return next_token_g.to(torch.int32)
 
-def sample(gen_tokens: torch.Tensor, logits: torch.Tensor, attention_scores: torch.Tensor, cfg: SamplerConfig, entropix_cfg: EntropixConfig,
+def sample(gen_tokens: torch.Tensor, logits: torch.Tensor, attention_scores: torch.Tensor, cfg: SamplerConfig, entropix_cfg: EntropixConfig, current_pos: int,
            clarifying_question_token: int = 2564, generator: torch.Generator = torch.Generator(device=device).manual_seed(1337)) -> Tuple[torch.Tensor, SamplerState]:
-    metrics = calculate_metrics(logits, attention_scores)
+    metrics = calculate_metrics(logits, attention_scores, current_pos)
     ent, vent = metrics["logits_entropy"], metrics["logits_varentropy"]
     attn_ent, attn_vent = metrics["attn_entropy"], metrics["attn_varentropy"]
     agreement = metrics["agreement"]

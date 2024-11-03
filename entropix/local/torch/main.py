@@ -50,7 +50,6 @@ torch.cuda.empty_cache()
 torch.set_float32_matmul_precision('high')
 
 
-
 class EntropixModel:
     def __init__(self, model_size: str = "1B"):
         """
@@ -328,9 +327,9 @@ class EntropixModel:
             kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim).to(device)
 
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, generator=self.generator)
 
-            metrics = calculate_metrics(logits, scores)
+            metrics = calculate_metrics(logits, scores, seqlen)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
@@ -345,9 +344,9 @@ class EntropixModel:
             while cur_pos < max_tokens:
                 cur_pos += 1
                 logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, generator=self.generator)
 
-                metrics = calculate_metrics(logits, scores)
+                metrics = calculate_metrics(logits, scores, cur_pos)
                 for key in metrics_data.keys():
                     if key in metrics:
                         metrics_data[key].append(metrics[key].item())
@@ -607,10 +606,10 @@ class EntropixModel:
 
             # Generate first token
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, generator=self.generator)
 
             # Track metrics
-            metrics = calculate_metrics(logits, scores)
+            metrics = calculate_metrics(logits, scores, seqlen)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
@@ -629,10 +628,10 @@ class EntropixModel:
             while cur_pos < max_tokens:
                 cur_pos += 1
                 logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, generator=self.generator)
 
                 # Track metrics
-                metrics = calculate_metrics(logits, scores)
+                metrics = calculate_metrics(logits, scores, cur_pos)
                 for key in metrics_data.keys():
                     if key in metrics:
                         metrics_data[key].append(metrics[key].item())
