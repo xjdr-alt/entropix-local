@@ -19,7 +19,7 @@ class GenerateConfig:
             Defaults to None.
     """
     prompt: str = "Tell me a joke"
-    max_tokens: Optional[int] = 600
+    max_tokens: Optional[int] = 4000
     debug: bool = True
     stream: bool = True
     csv_file: Optional[str] = None
@@ -35,8 +35,8 @@ class GenerateConfig:
         if self.max_tokens is not None:
             if not isinstance(self.max_tokens, int):
                 raise ValueError("max_tokens must be an integer")
-            if self.max_tokens < 1 or self.max_tokens > 2048:
-                raise ValueError("max_tokens must be between 1 and 2048")
+            if self.max_tokens < 1 or self.max_tokens > 8000:
+                raise ValueError("max_tokens must be between 1 and 8000")
 
     @classmethod
     def help(cls) -> str:

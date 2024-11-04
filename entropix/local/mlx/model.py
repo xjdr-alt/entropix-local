@@ -34,18 +34,12 @@ def apply_rotary_emb(xq: mx.array, xk: mx.array, freqs_cis: mx.array, dtype=mx.f
     return xq_out.astype(dtype), xk_out.astype(dtype)
 
 def attention(x: mx.array, layer_weights: LayerWeights, model_params, cur_pos: int, layer_idx: int, freqs_cis: mx.array, kvcache: KVCache, attn_mask: Optional[mx.array] = None) -> Tuple[mx.array, KVCache, mx.array]:
-    # Check if x is 2D or 3D and adjust accordingly
-    if len(x.shape) == 2:
-        bsz = 1
-        seq_len, dim = x.shape
-        x = mx.expand_dims(x,0)  # Add batch dimension
-    else:
-        bsz, seq_len, dim = x.shape
+    bsz, _, _ = x.shape
 
     n_rep = model_params.n_local_heads // model_params.n_local_kv_heads
-    xq = mx.reshape(mx.matmul(x, layer_weights.wq.T), (bsz, seq_len, model_params.n_local_heads, model_params.head_dim))
-    xk = mx.reshape(mx.matmul(x, layer_weights.wk.T), (bsz, seq_len, model_params.n_local_kv_heads, model_params.head_dim))
-    xv = mx.reshape(mx.matmul(x, layer_weights.wv.T), (bsz, seq_len, model_params.n_local_kv_heads, model_params.head_dim))
+    xq = mx.reshape(mx.matmul(x, layer_weights.wq.T), (bsz, -1, model_params.n_local_heads, model_params.head_dim))
+    xk = mx.reshape(mx.matmul(x, layer_weights.wk.T), (bsz, -1, model_params.n_local_kv_heads, model_params.head_dim))
+    xv = mx.reshape(mx.matmul(x, layer_weights.wv.T), (bsz, -1, model_params.n_local_kv_heads, model_params.head_dim))
 
     xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis, dtype=xq.dtype)
     keys, values, kvcache = kvcache.update(xk, xv, layer_idx, cur_pos, n_rep)
@@ -66,7 +60,7 @@ def attention(x: mx.array, layer_weights: LayerWeights, model_params, cur_pos: i
     scores = mx.softmax(padded_logits, axis=-1).astype(x.dtype)
     
     output = mx.matmul(scores.astype(values.dtype), values)
-    output = mx.reshape(mx.transpose(output, (0, 2, 1, 3)), (bsz, seq_len, -1))
+    output = mx.reshape(mx.transpose(output, (0, 2, 1, 3)), (xq.shape[0], xq.shape[2], -1))
     out = mx.matmul(output, layer_weights.wo.T)
     
     if len(x.shape) == 2:
