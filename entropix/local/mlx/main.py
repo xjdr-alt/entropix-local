@@ -317,9 +317,9 @@ class EntropixModel:
         kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim)
 
         logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
+        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, rng_key=self.rng_key)
 
-        metrics = calculate_metrics(logits, scores)
+        metrics = calculate_metrics(logits, scores, seqlen)
         for key in metrics_data.keys():
             if key in metrics:
                 metrics_data[key].append(metrics[key].item())
@@ -334,9 +334,9 @@ class EntropixModel:
         while cur_pos < max_tokens:
             cur_pos += 1
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
+            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, rng_key=self.rng_key)
 
-            metrics = calculate_metrics(logits, scores)
+            metrics = calculate_metrics(logits, scores, cur_pos)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
@@ -563,7 +563,7 @@ class EntropixModel:
         
         return fig
 
-    def generate_stream(self, prompt: str, max_tokens: int = 600, debug: bool = True, batch: bool = False) -> str:
+    def generate_stream(self, prompt: str, max_tokens: int = 4000, debug: bool = True, batch: bool = False) -> str:
         """Stream tokens as they're generated.
         
         Args:
@@ -597,10 +597,10 @@ class EntropixModel:
 
         # Generate first token
         logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
+        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, rng_key=self.rng_key)
 
         # Track metrics
-        metrics = calculate_metrics(logits, scores)
+        metrics = calculate_metrics(logits, scores, seqlen)
         for key in metrics_data.keys():
             if key in metrics:
                 metrics_data[key].append(metrics[key].item())
@@ -619,10 +619,10 @@ class EntropixModel:
         while cur_pos < max_tokens:
             cur_pos += 1
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, rng_key=self.rng_key)
+            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, rng_key=self.rng_key)
 
             # Track metrics
-            metrics = calculate_metrics(logits, scores)
+            metrics = calculate_metrics(logits, scores, cur_pos)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())

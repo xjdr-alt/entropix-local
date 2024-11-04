@@ -1,10 +1,10 @@
 import mlx.core as mx
 from typing import Tuple, Dict
 
-#global inports
+#global imports
 from entropix.local.config import SamplerState, SamplerConfig, EntropixConfig
 
-#framework specific improts
+#framework specific imports
 from entropix.local.mlx.metrics import calculate_metrics
 
 def multinomial_sample_one(probs_sort: mx.array, rng_key) -> mx.array:
@@ -109,8 +109,8 @@ def adaptive_sample(logits: mx.array, temperature: float, epsilon: float = 0.01,
     return next_token.astype(mx.int32)
 
 def sample(gen_tokens: mx.array, logits: mx.array, attention_scores: mx.array, cfg: SamplerConfig, entropix_cfg: EntropixConfig,
-           clarifying_question_token: int = 2564, rng_key=None) -> Tuple[mx.array, SamplerState]:
-    metrics = calculate_metrics(logits, attention_scores)
+           current_pos: int, clarifying_question_token: int = 2564, rng_key=None) -> Tuple[mx.array, SamplerState]:
+    metrics = calculate_metrics(logits, attention_scores, current_pos)
     ent, vent = metrics["logits_entropy"], metrics["logits_varentropy"]
     attn_ent, attn_vent = metrics["attn_entropy"], metrics["attn_varentropy"]
     agreement = metrics["agreement"]

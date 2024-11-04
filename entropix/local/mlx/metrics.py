@@ -1,34 +1,44 @@
 import mlx.core as mx
+import mlx.nn as nn
 from typing import Tuple, Dict, NamedTuple
 from enum import Enum
 
 LN_2 = 0.69314718056 
+DEFAULT_MASK_VALUE = -1e9
+
+def calculate_attention_varentropy(attention_scores: mx.array, current_pos: mx.array) -> Tuple[mx.array, mx.array]:
+    """Calculate the entropy and varentropy of attention probabilities with causal masking."""
+    seq_length = attention_scores.shape[-1]
+    mask = mx.arange(seq_length) >= current_pos
+    mask = mask.reshape(1, 1, 1, -1)
+    attention_scores = mx.where(mask, mx.array(DEFAULT_MASK_VALUE), attention_scores)
+    
+    attention_probs = mx.softmax(attention_scores, axis=-1)
+    attention_probs_clamped = mx.clip(attention_probs, 1e-10, 1.0)
+    entropy = -mx.sum(attention_probs * mx.log2(attention_probs_clamped), axis=-1)
+    varentropy = mx.sum(attention_probs * (mx.log2(attention_probs_clamped) + mx.expand_dims(entropy, -1))**2, axis=-1)
+    
+    return entropy, varentropy, attention_probs
 
 def calculate_varentropy_logsoftmax(logits: mx.array, axis: int = -1) -> Tuple[mx.array, mx.array]:
     """Calculate the entropy and varentropy of the probability distribution using logsoftmax."""
-    #log_probs = mx.log_softmax(logits, axis=axis)
-    log_probs = mx.log(mx.softmax(logits, axis=axis))
+    log_probs = nn.log_softmax(logits, axis=axis)
     probs = mx.exp(log_probs)
     entropy = -mx.sum(probs * log_probs, axis=axis) / LN_2  # Convert to base-2
     varentropy = mx.sum(probs * (log_probs / LN_2 + mx.expand_dims(entropy, -1))**2, axis=axis)
     return entropy, varentropy
 
 
-def calculate_metrics(logits: mx.array, attention_scores: mx.array) -> Dict[str, mx.array]:
-    entropy, varentropy = calculate_varentropy_logsoftmax(logits)
-    attention_probs = mx.softmax(attention_scores, axis=-1)
-    attn_entropy = -mx.sum(attention_probs * mx.log2(mx.clip(attention_probs, 1e-10, 1.0)), axis=-1)
-    attn_varentropy = mx.var(attn_entropy, axis=1)
-
-    attn_varentropy = mx.where(mx.isnan(attn_varentropy), mx.zeros_like(attn_varentropy), attn_varentropy)
+def calculate_metrics(logits: mx.array, attention_scores: mx.array, current_pos: mx.array) -> Dict[str, mx.array]:
+    logits_entropy, logits_varentropy = calculate_varentropy_logsoftmax(logits)
+    attn_entropy, attn_varentropy, attention_probs = calculate_attention_varentropy(attention_scores, current_pos)
     mean_attention = mx.mean(attention_probs, axis=1)
     agreement = mx.mean(mx.abs(attention_probs - mx.expand_dims(mean_attention, 1)), axis=(1, 2))
-
     interaction_strength = mx.mean(mx.abs(attention_scores), axis=(1, 2, 3))
 
     return {
-        "logits_entropy": mx.mean(entropy),
-        "logits_varentropy": mx.mean(varentropy),
+        "logits_entropy": mx.mean(logits_entropy),
+        "logits_varentropy": mx.mean(logits_varentropy),
         "attn_entropy": mx.mean(attn_entropy),
         "attn_varentropy": mx.mean(attn_varentropy),
         "agreement": mx.mean(agreement),
