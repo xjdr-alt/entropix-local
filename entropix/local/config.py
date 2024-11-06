@@ -19,7 +19,7 @@ class GenerateConfig:
             Defaults to None.
     """
     prompt: str = "Tell me a joke"
-    max_tokens: Optional[int] = 4000
+    max_tokens: Optional[int] = 600
     debug: bool = True
     stream: bool = True
     csv_file: Optional[str] = None
@@ -35,8 +35,8 @@ class GenerateConfig:
         if self.max_tokens is not None:
             if not isinstance(self.max_tokens, int):
                 raise ValueError("max_tokens must be an integer")
-            if self.max_tokens < 1 or self.max_tokens > 8000:
-                raise ValueError("max_tokens must be between 1 and 8000")
+            if self.max_tokens < 1 or self.max_tokens > 2048:
+                raise ValueError("max_tokens must be between 1 and 2048")
 
     @classmethod
     def help(cls) -> str:
@@ -146,11 +146,6 @@ class ModelParams(NamedTuple):
   rope_theta: float
   use_scaled_rope: bool
 
-MODEL_IDS = {
-    "3B": "meta-llama/Llama-3.2-3B-Instruct",
-    "1B": "meta-llama/Llama-3.2-1B-Instruct"
-}
-
 def get_model_params(config: ModelConfig) -> ModelParams:
     """Create ModelParams from config."""
     return ModelParams(
@@ -162,6 +157,22 @@ def get_model_params(config: ModelConfig) -> ModelParams:
         rope_theta=config.rope_theta,
         use_scaled_rope=config.use_scaled_rope
     )
+
+def create_model_params(config: ModelConfig) -> ModelParams:
+    """Creates ModelParams from a ModelConfig."""
+    return ModelParams(
+        n_layers=config.n_layers,
+        n_local_heads=config.n_heads,
+        n_local_kv_heads=config.n_kv_heads,
+        head_dim=config.dim // config.n_heads,
+        max_seq_len=config.max_seq_len,
+        rope_theta=config.rope_theta,
+        use_scaled_rope=config.use_scaled_rope,
+    )
+
+# Common model parameter configurations
+LLAMA_1B_PARAMS = create_model_params(MODEL_CONFIGS["1B"])
+LLAMA_3B_PARAMS = create_model_params(MODEL_CONFIGS["3B"])
 
 # Experimental custom config to trigger different sampler states
 class SamplerConfig:

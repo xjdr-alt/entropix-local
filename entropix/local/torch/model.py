@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import torch._dynamo as dynamo
+torch._dynamo.config.suppress_errors = True
+
 #global imports
 from entropix.local.torch_weights import LayerWeights, XfmrWeights
 from entropix.local.config import ModelParams
@@ -41,7 +44,7 @@ def apply_rotary_emb(xq: torch.Tensor, xk: torch.Tensor, freqs_cis: torch.Tensor
     return xq_out.to(dtype), xk_out.to(dtype)
 
 def attention(x: torch.Tensor, layer_weights: LayerWeights, model_params, cur_pos: int, layer_idx: int, freqs_cis: torch.Tensor, kvcache: KVCache, attn_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, KVCache, torch.Tensor]:
-    bsz, _, _ = x.shape
+    bsz, *_ = x.shape
     n_rep = model_params.n_local_heads // model_params.n_local_kv_heads
     xq = F.linear(x, layer_weights.wq).reshape(bsz, -1, model_params.n_local_heads, model_params.head_dim)
     xk = F.linear(x, layer_weights.wk).reshape(bsz, -1, model_params.n_local_kv_heads, model_params.head_dim)
@@ -54,19 +57,23 @@ def attention(x: torch.Tensor, layer_weights: LayerWeights, model_params, cur_po
     scores = torch.matmul(xq, keys.to(xq.dtype))
     pre_scores = scores / math.sqrt(model_params.head_dim)
     scores = pre_scores.to(torch.float32)  # Always do attention softmax at float32
-    if cur_pos == 0:
+    
+    # Only apply attention mask during prefill (cur_pos == 0) and when mask exists
+    if cur_pos == 0 and attn_mask is not None:
         scores = scores + attn_mask
+        
     mask = torch.where(scores != 0.0, scores, DEFAULT_MASK_VALUE)
     padded_logits = torch.where((mask >= DEFAULT_MASK_VALUE * 0.5), scores, DEFAULT_MASK_VALUE)
     scores = F.softmax(padded_logits, dim=-1)
     output = torch.matmul(scores.to(torch.float32), values.to(torch.float32))
     output = output.transpose(1, 2).reshape(xq.shape[0], xq.shape[2], -1).to(x.dtype)
     out = F.linear(output, layer_weights.wo)
+
     return out, kvcache, pre_scores
 
 def feed_forward(x: torch.Tensor, layer_weights: LayerWeights) -> torch.Tensor:
  return F.linear(F.silu(F.linear(x, layer_weights.w1)) * F.linear(x, layer_weights.w3), layer_weights.w2)
- 
+
 def xfmr(xfmr_weights: XfmrWeights, model_params: ModelParams, tokens: torch.Tensor, cur_pos: int, freqs_cis: torch.Tensor, kvcache: KVCache, attn_mask: Optional[torch.Tensor]=None) -> Tuple[torch.Tensor, KVCache, torch.Tensor, AttnStats]:
     h = xfmr_weights.tok_embeddings[tokens]
     attn_stats = AttnStats.new(

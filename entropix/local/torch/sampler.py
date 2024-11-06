@@ -25,7 +25,7 @@ def _sample(logits: torch.Tensor, temperature: float, top_p: float, top_k: int, 
     logit = logits[:, -1]
     probs = F.softmax(logit / temperature, dim=-1)
 
-    # Apply min_p sampling
+    # Apply min_p samplinga
     if min_p > 0.0:
         p_max = torch.max(probs, dim=-1, keepdim=True).values
         indices_to_remove = probs < (min_p * p_max)

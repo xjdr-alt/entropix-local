@@ -27,7 +27,7 @@ def calculate_attention_varentropy(attention_scores: torch.Tensor, current_pos: 
     varentropy = torch.sum(attention_probs * (torch.log2(attention_probs_clamped) + entropy.unsqueeze(-1))**2, dim=-1)
     
     return entropy, varentropy, attention_probs
-
+    
 def calculate_varentropy_logsoftmax(logits: torch.Tensor, axis: int = -1) -> Tuple[torch.Tensor, torch.Tensor]:
     """Calculate the entropy and varentropy of the probability distribution using logsoftmax."""
     log_probs = F.log_softmax(logits, dim=axis)

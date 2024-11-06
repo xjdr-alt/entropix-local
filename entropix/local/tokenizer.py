@@ -1,5 +1,4 @@
 import os
-import urllib
 from logging import getLogger
 from pathlib import Path
 from typing import (
@@ -16,8 +15,19 @@ from typing import (
 )
 
 import tiktoken
+
 from tiktoken.load import load_tiktoken_bpe
 
+logger = getLogger(__name__)
+
+# The tiktoken tokenizer can handle <=400k chars without
+# pyo3_runtime.PanicException.
+TIKTOKEN_MAX_ENCODE_CHARS = 400_000
+
+# https://github.com/openai/tiktoken/issues/195
+# Here we iterate over subsequences and split if we exceed the limit
+# of max consecutive non-whitespace or whitespace characters.
+MAX_NO_WHITESPACES_CHARS = 25_000
 
 def download_tokenizer(tokenizer_url: str = "https://huggingface.co/meta-llama/Llama-3.2-1B/resolve/main/original/tokenizer.model?download=true",
                       tokenizer_path: str = "entropix/data/tokenizer.model") -> str:
@@ -51,19 +61,6 @@ def download_tokenizer(tokenizer_url: str = "https://huggingface.co/meta-llama/L
         print(f"Tokenizer already exists at {tokenizer_path}")
     
     return tokenizer_path
-
-logger = getLogger(__name__)
-
-
-# The tiktoken tokenizer can handle <=400k chars without
-# pyo3_runtime.PanicException.
-TIKTOKEN_MAX_ENCODE_CHARS = 400_000
-
-# https://github.com/openai/tiktoken/issues/195
-# Here we iterate over subsequences and split if we exceed the limit
-# of max consecutive non-whitespace or whitespace characters.
-MAX_NO_WHITESPACES_CHARS = 25_000
-
 
 class Tokenizer:
   """

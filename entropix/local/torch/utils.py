@@ -1,5 +1,8 @@
 import torch
+from datetime import datetime
 import pandas as pd
+from dataclasses import dataclass
+from typing import List
 
 if torch.backends.mps.is_available():
     device = torch.device("mps")
@@ -100,3 +103,47 @@ def validate_csv(file_path: str) -> bool:
     except Exception as e:
         print(f"Error reading CSV file: {str(e)}")
         return False
+    
+@dataclass
+class Message:
+    def __init__(self, content, role):
+        self.content = content
+        self.role = role
+
+chat_preamble = "You are a helpful assistant."
+role_to_header = {
+    "system": "user",
+    "user": "assistant",
+    "assistant": "user",
+}
+def formatted_date():
+    current_date = datetime.now()
+    return current_date.strftime("%d %B %Y")
+
+def system_header() -> str:
+    return "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+
+def env(tools: bool) -> str:
+    if tools:
+        return (
+            "Environment: ipython\nTools: brave_search"  # , wolfram_alpha\n\n"
+        )
+    return "Environment: ipython"
+
+def dates() -> str:
+    return f"Cutting Knowledge Date: December 2023\nToday Date: {formatted_date()}\n\n"
+
+def header(text: str, role: str) -> str:
+    return f"{text}<|eot_id|><|start_header_id|>{role}<|end_header_id|>\n\n"
+
+def generate_chat_prompt(messages: List[Message]) -> str:
+    prompt = f"""{system_header()}{env(False)}
+Cutting Knowledge Date: December 2023
+Today Date: {formatted_date()}
+
+"""
+    for message in messages:
+        # Do we care about tool_plan or tool_results or tool_calls here?
+        prompt += header(message["content"], role_to_header[message["role"]])
+
+    return prompt
