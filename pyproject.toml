@@ -16,6 +16,9 @@ dependencies = [
     "torch>=2.5.1",
     "transformers>=4.45.2",
     "tyro>=0.8.12",
+    "fastapi>=0.109.2",
+    "uvicorn>=0.27.1",
+    "pydantic>=2.6.1",
 ]
 
 [project.optional-dependencies]
