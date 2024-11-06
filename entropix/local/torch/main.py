@@ -35,6 +35,10 @@ from entropix.local.torch.kvcache import KVCache
 from entropix.local.torch.model import xfmr
 from entropix.local.torch.sampler import sample
 from entropix.local.torch.metrics import calculate_metrics
+from entropix.local.torch.dslider import adaptive_dirichlet_step
+from entropix.local.torch.dslider import initialize_state
+from entropix.local.torch.dslider_config import DEFAULT_DS_CONFIG
+from entropix.local.torch.utils import generate_chat_prompt
 
 if torch.backends.mps.is_available():
     device = torch.device("mps")
@@ -48,6 +52,7 @@ if device == "cuda":
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 torch.cuda.empty_cache()
 torch.set_float32_matmul_precision('high')
+
 
 
 class EntropixModel:
@@ -312,28 +317,33 @@ class EntropixModel:
             'logits_entropy': [],
             'logits_varentropy': [],
             'attention_entropy': [],
-            'attention_varentropy': []
+            'attention_varentropy': [],
+            'kl_divergence': []
         }
         sampler_states = []
         generated_tokens = []
 
         with torch.inference_mode():
-            tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
+            # tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
+            tokens = self.tokenizer.encode(prompt, bos=False, eos=False, allowed_special='all')
             tokens = torch.tensor([tokens], dtype=torch.long).to(device)
             bsz, seqlen = tokens.shape
             cur_pos = 0
             attn_mask = build_attn_mask(seqlen, cur_pos)
             freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
             kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim).to(device)
+            state = initialize_state(bsz, 128256, DEFAULT_DS_CONFIG)
+            cfg = DEFAULT_DS_CONFIG
 
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, generator=self.generator)
-
+            # next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+            state, next_token, kl = adaptive_dirichlet_step(state, logits, cfg)
             metrics = calculate_metrics(logits, scores, seqlen)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
-            sampler_states.append(sampler_state)
+            metrics_data['kl_divergence'].append(kl.item())
+            # sampler_states.append(sampler_state)
 
             gen_tokens = next_token
             output = self.tokenizer.decode([next_token.item()])
@@ -344,15 +354,16 @@ class EntropixModel:
             while cur_pos < max_tokens:
                 cur_pos += 1
                 logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, generator=self.generator)
-
+                # next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+                state, next_token, kl = adaptive_dirichlet_step(state, logits, cfg)
                 metrics = calculate_metrics(logits, scores, cur_pos)
                 for key in metrics_data.keys():
                     if key in metrics:
                         metrics_data[key].append(metrics[key].item())
-                sampler_states.append(sampler_state)
+                # sampler_states.append(sampler_state)
                 metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
                 metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
+                metrics_data['kl_divergence'].append(kl.item())
                 generated_tokens.append(next_token.item())
                 gen_tokens = torch.cat((gen_tokens, next_token), dim=1)
                 output += self.tokenizer.decode(next_token.tolist()[0])
@@ -361,11 +372,55 @@ class EntropixModel:
 
         if debug:
             #self.debug_visualize_metrics(metrics_data)
-            self.visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], sampler_states, generated_tokens)
+            self.visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], metrics_data['kl_divergence'], sampler_states, generated_tokens)
             fig = self.visualize_token_entropy_varentropy(metrics_data, generated_tokens)
+            self.visualize_kl_divergence(metrics_data['kl_divergence'], generated_tokens)
             if not batch:
                 fig.show()
         return output
+
+    def visualize_kl_divergence(self, kl_divergence, generated_tokens):
+        # Get token texts
+        token_texts = [self.tokenizer.decode([token]) for token in generated_tokens]
+        steps = list(range(len(kl_divergence)))
+
+        # Create hover text
+        hover_text = [
+            f"Token: {token_texts[i]}<br>"
+            f"Step: {i}<br>"
+            f"KL Divergence: {kl_divergence[i]:.4f}"
+            for i in range(len(kl_divergence))
+        ]
+
+        # Create the figure
+        fig = go.Figure()
+
+        # Add KL divergence trace
+        fig.add_trace(go.Scatter(
+            x=steps,
+            y=kl_divergence,
+            mode='lines+markers',
+            marker=dict(size=6),
+            text=hover_text,
+            hoverinfo='text',
+            name='KL Divergence'
+        ))
+
+        # Update layout
+        fig.update_layout(
+            title='KL Divergence over Generation Steps',
+            xaxis_title='Generation Step',
+            yaxis_title='KL Divergence',
+            hovermode='closest'
+        )
+
+        # Generate timestamp and save
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"entropix/results/kl_divergence_{timestamp}.html"
+        fig.write_html(filename, include_plotlyjs=True, full_html=True)
+        print(f"KL divergence visualization saved to {filename}")
+
+        return fig
 
     def debug_visualize_metrics(self, metrics_data):
         fig, axs = plt.subplots(3, 2, figsize=(15, 15))
@@ -400,7 +455,7 @@ class EntropixModel:
         plt.tight_layout()
         #plt.show()
 
-    def visualize_sampler_metrics(self, entropies, varentropies, sampler_states, generated_tokens):
+    def visualize_sampler_metrics(self, entropies, varentropies, kl_divergences, sampler_states, generated_tokens):
         # Create a plotly figure with subplots
         fig = go.Figure()
         
@@ -424,89 +479,120 @@ class EntropixModel:
             "State: %{customdata[1]}"
         )
         
+        # Scale KL divergences for better visualization
+        scaled_kl_divergences = [kl/500 if kl is not None else None for kl in kl_divergences]
+        
+        # Create x-axis values with fewer ticks
+        x_values = list(range(len(entropies)))
+        tick_spacing = max(1, len(x_values) // 20)  # Show ~20 ticks on x-axis
+        
         # Add entropy trace
         fig.add_trace(go.Scatter(
-            x=list(range(len(entropies))),
+            x=x_values,
             y=entropies,
             name='Entropy',
             line=dict(color='blue'),
             yaxis='y1',
             customdata=list(zip(
                 token_texts if token_texts else [''] * len(entropies),
-                [state.value for state in sampler_states]
+                ['N/A'] * len(entropies) if not sampler_states else [state.value for state in sampler_states]
             )),
             hovertemplate=hover_template
         ))
         
         # Add varentropy trace
         fig.add_trace(go.Scatter(
-            x=list(range(len(varentropies))),
+            x=x_values,
             y=varentropies,
             name='Varentropy',
             line=dict(color='red'),
             yaxis='y1',
             customdata=list(zip(
                 token_texts if token_texts else [''] * len(varentropies),
-                [state.value for state in sampler_states]
+                ['N/A'] * len(varentropies) if not sampler_states else [state.value for state in sampler_states]
             )),
             hovertemplate=hover_template
         ))
         
-        # Create state indicators
-        state_colors = [colors[state] for state in sampler_states]
-        state_names = [state.value for state in sampler_states]
-        
-        # Add state indicators
+        # Add KL divergence trace (scaled)
         fig.add_trace(go.Scatter(
-            x=list(range(len(sampler_states))),
-            y=[0] * len(sampler_states),
-            mode='markers',
-            marker=dict(
-                color=state_colors,
-                size=20,
-                symbol='square',
-            ),
+            x=x_values,
+            y=scaled_kl_divergences,
+            name='KL Divergence (/500)',
+            line=dict(color='green'),
+            yaxis='y1',
             customdata=list(zip(
-                token_texts if token_texts else [''] * len(sampler_states),
-                state_names
+                token_texts if token_texts else [''] * len(kl_divergences),
+                ['N/A'] * len(kl_divergences) if not sampler_states else [state.value for state in sampler_states],
+                kl_divergences  # Add original KL values to customdata
             )),
-            hovertemplate=hover_template,
-            yaxis='y2',
-            showlegend=False,
+            hovertemplate=(
+                "Step: %{x}<br>" +
+                "Scaled Value: %{y:.4f}<br>" +
+                "Actual Value: %{customdata[2]:.1f}<br>" +
+                "Token: %{customdata[0]}<br>" +
+                "State: %{customdata[1]}"
+            )
         ))
         
-        # Add state legend
-        for state, color in colors.items():
+        # Only add state indicators and legend if sampler_states is not empty
+        if sampler_states:
+            # Create state indicators
+            state_colors = [colors[state] for state in sampler_states]
+            state_names = [state.value for state in sampler_states]
+            
+            # Add state indicators
             fig.add_trace(go.Scatter(
-                x=[None],
-                y=[None],
+                x=list(range(len(sampler_states))),
+                y=[0] * len(sampler_states),
                 mode='markers',
                 marker=dict(
-                    color=color,
-                    size=10,
+                    color=state_colors,
+                    size=20,
                     symbol='square',
                 ),
-                name=state.value,
-                showlegend=True,
+                customdata=list(zip(
+                    token_texts if token_texts else [''] * len(sampler_states),
+                    state_names
+                )),
+                hovertemplate=hover_template,
+                yaxis='y2',
+                showlegend=False,
             ))
+            
+            # Add state legend
+            for state, color in colors.items():
+                fig.add_trace(go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode='markers',
+                    marker=dict(
+                        color=color,
+                        size=10,
+                        symbol='square',
+                    ),
+                    name=state.value,
+                    showlegend=True,
+                ))
         
         # Update layout
+        title_text = 'Entropy, Varentropy, KL Divergence'
+        if sampler_states:
+            title_text += ' and Sampler States'
+        title_text += ' over Generation Steps'
+        
         fig.update_layout(
-            title='Entropy, Varentropy and Sampler States over Generation Steps',
+            title=title_text,
             xaxis=dict(
                 title='Generation Step',
                 showticklabels=True,
-                tickmode='linear',
-                dtick=5
+                tickmode='array',
+                tickvals=list(range(0, len(entropies), tick_spacing)),
+                ticktext=list(range(0, len(entropies), tick_spacing))
             ),
             yaxis=dict(
                 title='Value',
-                domain=[0.25, 0.95]  
-            ),
-            yaxis2=dict(
-                domain=[0.1, 0.2],  
-                showticklabels=False,
-                range=[-0.5, 0.5]
+                domain=[0.25 if sampler_states else 0.15, 0.95]  
             ),
             height=750,
             showlegend=True,
@@ -519,13 +605,42 @@ class EntropixModel:
             )
         )
         
-        # Add tokens
+        if sampler_states:
+            fig.update_layout(
+                yaxis2=dict(
+                    domain=[0.1, 0.2],
+                    showticklabels=False,
+                    range=[-0.5, 0.5]
+                )
+            )
+        
+        # Add tokens with color based on either sampler states or KL divergence
         formatted_text = ""
         line_length = 0
-        max_line_length = 180 #some longer prompt overflow for some reason, keep it 270 for now
+        max_line_length = 180
         
-        for token, state in zip(token_texts, sampler_states):
-            color = colors[state]
+        # Calculate KL divergence threshold for coloring (e.g., 75th percentile)
+        if not sampler_states and kl_divergences:
+            kl_threshold = np.percentile(kl_divergences, 75)
+        
+        for i, token in enumerate(token_texts):
+            if sampler_states:
+                # Use sampler state colors
+                color = colors[sampler_states[i]]
+            else:
+                # Use KL divergence-based coloring
+                if kl_divergences and i < len(kl_divergences):
+                    # Interpolate color between black and red based on KL divergence
+                    kl_value = kl_divergences[i]
+                    if kl_value > kl_threshold:
+                        # Calculate red intensity (0 to 255) based on how much the value exceeds the threshold
+                        red_intensity = min(255, int(255 * (kl_value - kl_threshold) / kl_threshold))
+                        color = f'rgb({red_intensity}, 0, 0)'
+                    else:
+                        color = 'black'
+                else:
+                    color = 'black'
+            
             token_text = f"<span style='color: {color}'>{token}</span> "
             
             # Add newline if current line would be too long
@@ -536,32 +651,32 @@ class EntropixModel:
             formatted_text += token_text
             line_length += len(token) + 1  # +1 for the space
         
-        
         # Add the text
         fig.add_annotation(
             text=formatted_text,
             xref="paper",
             yref="paper",
             x=0,
-            y=0.07,  
+            y=0.07,
             showarrow=False,
             font=dict(size=20),
             align="left",
             xanchor="left",
             yanchor="top",
             xshift=5,
-            yshift=0, 
+            yshift=0,
             bordercolor="gray",
-            borderwidth=0,  
+            borderwidth=0,
         )
         
+        # Calculate bottom margin based on text length
         num_lines = formatted_text.count('<br>') + 1
-        bottom_margin = max(30, num_lines * 15)  
+        bottom_margin = max(30, num_lines * 25)  # Increased multiplier for better spacing
         
+        # Update layout to allow text to extend
         fig.update_layout(
             margin=dict(b=bottom_margin),
-            yaxis=dict(domain=[0.25, 0.95]),  
-            yaxis2=dict(domain=[0.1, 0.2])   
+            height=max(750, 750 + bottom_margin - 30)  # Dynamically increase height based on text
         )
         
         # Generate timestamp and save
@@ -588,13 +703,14 @@ class EntropixModel:
             'logits_entropy': [],
             'logits_varentropy': [],
             'attention_entropy': [],
-            'attention_varentropy': []
+            'attention_varentropy': [],
+            'kl_divergence': []
         }
         sampler_states = []
         generated_tokens = []
-
         with torch.inference_mode():
-            tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
+            # tokens = self.tokenizer.encode("<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n", bos=True, eos=False, allowed_special='all')
+            tokens = self.tokenizer.encode(prompt, bos=False, eos=False, allowed_special='all')
             tokens = torch.tensor([tokens], dtype=torch.long).to(device)
             
             # Initial setup
@@ -603,17 +719,20 @@ class EntropixModel:
             attn_mask = build_attn_mask(seqlen, cur_pos)
             freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
             kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim).to(device)
+            cfg = DEFAULT_DS_CONFIG.to(device)
+            state = initialize_state(bsz, 128256, cfg, device=device)
 
             # Generate first token
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-            next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, generator=self.generator)
-
+            # next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+            state, next_token, kl = adaptive_dirichlet_step(state, logits[:, -1], cfg)
             # Track metrics
             metrics = calculate_metrics(logits, scores, seqlen)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
-            sampler_states.append(sampler_state)
+            metrics_data['kl_divergence'].append(kl.item())
+            # sampler_states.append(sampler_state)
             generated_tokens.append(next_token.item())
 
             # Yield first token
@@ -628,29 +747,32 @@ class EntropixModel:
             while cur_pos < max_tokens:
                 cur_pos += 1
                 logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-                next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, generator=self.generator)
+                # next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, generator=self.generator)
+                state, next_token, kl = adaptive_dirichlet_step(state, logits[:, -1], cfg)
 
                 # Track metrics
                 metrics = calculate_metrics(logits, scores, cur_pos)
                 for key in metrics_data.keys():
                     if key in metrics:
                         metrics_data[key].append(metrics[key].item())
-                sampler_states.append(sampler_state)
+                # sampler_states.append(sampler_state)
                 metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
                 metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
+                metrics_data['kl_divergence'].append(kl.item())
                 generated_tokens.append(next_token.item())
 
                 # Update state and yield token
-                gen_tokens = torch.cat((gen_tokens, next_token), dim=1)
-                token_text = self.tokenizer.decode(next_token.tolist()[0])
+                gen_tokens = torch.cat((gen_tokens, next_token), dim=0)
+                token_text = self.tokenizer.decode(next_token.tolist())
                 yield token_text
 
                 if torch.isin(next_token, stop).any():
                     break
 
         if debug and len(generated_tokens) > 0:  # Only show visualizations if we have data
-            self.visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], sampler_states, generated_tokens)
+            self.visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], metrics_data['kl_divergence'], sampler_states, generated_tokens)
             fig = self.visualize_token_entropy_varentropy(metrics_data, generated_tokens)
+            self.visualize_kl_divergence(metrics_data['kl_divergence'], generated_tokens)
             # if not batch:
             #     fig.show()
 
@@ -692,6 +814,7 @@ def generate_text(config: GenerateConfig) -> None:
         print("Model not initialized. Please run initialize_model() first.")
         return
 
+    response = ""
     # Handle CSV input if provided
     if config.csv_file:
         csv_path = "entropix/prompts/" + config.csv_file
@@ -713,6 +836,7 @@ def generate_text(config: GenerateConfig) -> None:
             
             for idx, row in df.iterrows():
                 prompt = row['prompts'].strip()
+                prompt = generate_chat_prompt([{ "role": "user", "content": prompt }])
                 print(f"\nProcessing prompt {idx + 1}/{total_prompts}:")
                 print(f"Prompt: {prompt}\n")
                 
@@ -737,7 +861,8 @@ def generate_text(config: GenerateConfig) -> None:
         # Original single prompt behavior
         if config.stream:
             response = ""
-            for token in entropix_model.generate_stream(config.prompt, config.max_tokens, config.debug):
+            prompt = generate_chat_prompt([{ "role": "user", "content": config.prompt }])
+            for token in entropix_model.generate_stream(prompt, config.max_tokens, config.debug):
                 print(token, end='', flush=True)
                 response += token
             print()  # Final newline
