@@ -51,6 +51,11 @@ You could also batch process prompts with the following example command:
 python3 -m entropix.local.torch.main --config.csv_file "prompts.csv" --config.no-stream --config.debug
 ```
 
+You can also use OpenAI compatible API server to use entropix externally with following example command:
+```sh
+uvicorn entropix.local.torch.server_main:app
+````
+
 the --help describes the cli args, here is the brief overview:
 
 ```sh
