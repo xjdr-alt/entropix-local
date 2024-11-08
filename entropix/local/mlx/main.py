@@ -36,6 +36,8 @@ from entropix.local.mlx.utils import precompute_freqs_cis, build_attn_mask, vali
 from entropix.local.mlx.kvcache import KVCache
 from entropix.local.mlx.model import xfmr
 from entropix.local.mlx.sampler import sample
+from entropix.local.mlx.dslider import initialize_state, adaptive_dirichlet_step
+from entropix.local.mlx.dslider_config import DEFAULT_DS_CONFIG
 from entropix.local.mlx.metrics import calculate_metrics
 
 
@@ -138,7 +140,8 @@ class EntropixModel:
             'logits_entropy': [],
             'logits_varentropy': [],
             'attention_entropy': [],
-            'attention_varentropy': []
+            'attention_varentropy': [],
+            'kl_divergence': []
         }
         sampler_states = []
         generated_tokens = []
@@ -153,17 +156,20 @@ class EntropixModel:
         attn_mask = build_attn_mask(seqlen, cur_pos)
         freqs_cis = precompute_freqs_cis(self.model_params.head_dim, self.model_params.max_seq_len, self.model_params.rope_theta, self.model_params.use_scaled_rope)
         kvcache = KVCache.new(self.model_params.n_layers, bsz, self.model_params.max_seq_len, self.model_params.n_local_kv_heads, self.model_params.head_dim)
-
+        state = initialize_state(bsz, 128256, DEFAULT_DS_CONFIG)
+        cfg = DEFAULT_DS_CONFIG
         # Generate first token
         logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-        next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, rng_key=self.rng_key)
+        #next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, rng_key=self.rng_key)
+        state, next_token, kl = adaptive_dirichlet_step(state, logits[:, -1], cfg)
 
         # Track metrics
         metrics = calculate_metrics(logits, scores, seqlen)
         for key in metrics_data.keys():
             if key in metrics:
                 metrics_data[key].append(metrics[key].item())
-        sampler_states.append(sampler_state)
+        metrics_data['kl_divergence'].append(kl.item())
+        #sampler_states.append(sampler_state)
         generated_tokens.append(next_token.item())
 
         # Yield first token
@@ -178,16 +184,18 @@ class EntropixModel:
         while cur_pos < max_tokens:
             cur_pos += 1
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-            next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, rng_key=self.rng_key)
+            #next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, rng_key=self.rng_key)
+            state, next_token, kl = adaptive_dirichlet_step(state, logits[:, -1], cfg)
 
             # Track metrics
             metrics = calculate_metrics(logits, scores, cur_pos)
             for key in metrics_data.keys():
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
-            sampler_states.append(sampler_state)
+            #sampler_states.append(sampler_state)
             metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
             metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
+            metrics_data['kl_divergence'].append(kl.item())
             generated_tokens.append(next_token.item())
 
             # Update state and yield token

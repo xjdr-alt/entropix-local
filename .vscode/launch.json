@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Module",
+            "type": "python",
+            "request": "launch",
+            "module": "entropix.local.mlx.main",
+            "args": [
+                "--config.prompt", 
+                "Which number is larger 9.11 or 9.9?",
+                "--config.stream",
+                "--config.debug"
+            ],
+            "justMyCode": false
+        }
+    ]
+}
