@@ -24,8 +24,8 @@ import tyro
 import pandas as pd
 import csv
 
-#global inports
-from entropix.local.torch_weights import download_weights_torch, load_weights_torch
+#global imports
+from entropix.local.torch.torch_weights import download_weights_torch, load_weights_torch
 from entropix.local.tokenizer import download_tokenizer, Tokenizer
 from entropix.local.config import EntropixConfig, SamplerConfig, SamplerState, GenerateConfig, MODEL_CONFIGS, get_model_params
 

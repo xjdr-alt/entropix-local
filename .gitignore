@@ -160,3 +160,4 @@ cython_debug/
 /entropix/data
 /entropix/results
 .env
+.DS_Store
