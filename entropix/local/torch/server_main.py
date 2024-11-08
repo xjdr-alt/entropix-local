@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from entropix.local.config import MODEL_CONFIGS, get_model_params
-from entropix.local.torch_weights import load_weights_torch
+from entropix.local.torch.torch_weights import load_weights_torch
 from entropix.local.tokenizer import Tokenizer 
 from entropix.local.torch.prompts import ChatCompletionRequest, Message, generate_chat_prompt
 from entropix.local.torch.dslider_config import DEFAULT_DS_CONFIG

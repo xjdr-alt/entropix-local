@@ -7,7 +7,7 @@ import torch._dynamo as dynamo
 torch._dynamo.config.suppress_errors = True
 
 #global imports
-from entropix.local.torch_weights import LayerWeights, XfmrWeights
+from entropix.local.torch.torch_weights import LayerWeights, XfmrWeights
 from entropix.local.config import ModelParams
 
 #framework specific configs
