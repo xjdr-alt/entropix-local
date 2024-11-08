@@ -6,7 +6,7 @@ import torch.nn as nn
 MIN_TEMP = 1e-4
 MAX_TEMP = 1e4
 EPS = 1e-8
-VOCAB_SIZE = 128256
+VOCAB_SIZE = 128256  # llama
 
 
 @dataclass(frozen=True)
@@ -298,45 +298,48 @@ class DSConfig:
         return hash(tuple(hashable_items))
 
 
-# Default config values
-DEFAULT_DS_CONFIG = DSConfig(
-    emwa_logp_base=4.0,
-    emwa_logp_exp_factor=3.0,
-    emwa_dir_coeff=0.70,
-    emwa_temp_coeff=0.70,
-    emwa_dir_ent_coeff=0.70,
-    emwa_ent_scaffold_coeff=0.70,
-    emwa_varent_scaffold_coeff=0.70,
-    emwa_ent_naked_coeff=0.70,
-    emwa_varent_naked_coeff=0.70,
-    emwa_topk_ent_naked_coeff=0.70,
-    token_cross_ent_scaffold_coeff=0.65,
-    token_cross_ent_naked_coeff=0.65,
-    token_cross_var_scaffold_coeff=0.75,
-    token_cross_var_naked_coeff=0.65,
-    perturb_base_coeff=10.0,
-    perturb_exp_coeff=1.0,
-    dirichlet_support=torch.arange(VOCAB_SIZE),
-    noise_floor=-12.0,
-    # Threshold parameters
-    outlier_threshold=OutlierThreshold(
-        bilinear=torch.ones((4, 4)) * 1.3,  # Increased sensitivity
-        linear_state_ent=torch.ones(4) * 0.8,
-        linear_state_std=torch.ones(4) * 0.8,
-        linear_naked_ent=1.2,
-        linear_naked_std=1.2,
-        linear_naked_varent=1.2,
-        bias=0.0,
-    ),
-    argmax_threshold=ArgmaxThreshold(
-        weight=1.0,
-        bias=5.0,
-    ),
-    dirichlet_threshold=DirichletThreshold(weight=1.0, bias=5.0),
-    target_entropy=TargetEntropy(
-        linear=torch.tensor([1.0, 1.0, 1.0, 1.0]),
-        linear_inv_temp=torch.ones(1) * 8.0,
-        bias=0.0,
-    ),
-    outlier_topk=3,
-)
+def get_default_ds_config(vocab_size: int = VOCAB_SIZE) -> DSConfig:
+    return DSConfig(
+        emwa_logp_base=4.0,
+        emwa_logp_exp_factor=3.0,
+        emwa_dir_coeff=0.70,
+        emwa_temp_coeff=0.70,
+        emwa_dir_ent_coeff=0.70,
+        emwa_ent_scaffold_coeff=0.70,
+        emwa_varent_scaffold_coeff=0.70,
+        emwa_ent_naked_coeff=0.70,
+        emwa_varent_naked_coeff=0.70,
+        emwa_topk_ent_naked_coeff=0.70,
+        token_cross_ent_scaffold_coeff=0.65,
+        token_cross_ent_naked_coeff=0.65,
+        token_cross_var_scaffold_coeff=0.75,
+        token_cross_var_naked_coeff=0.65,
+        perturb_base_coeff=10.0,
+        perturb_exp_coeff=1.0,
+        dirichlet_support=torch.arange(vocab_size),
+        noise_floor=-12.0,
+        # Threshold parameters
+        outlier_threshold=OutlierThreshold(
+            bilinear=torch.ones((4, 4)) * 1.3,  # Increased sensitivity
+            linear_state_ent=torch.ones(4) * 0.8,
+            linear_state_std=torch.ones(4) * 0.8,
+            linear_naked_ent=1.2,
+            linear_naked_std=1.2,
+            linear_naked_varent=1.2,
+            bias=0.0,
+        ),
+        argmax_threshold=ArgmaxThreshold(
+            weight=1.0,
+            bias=5.0,
+        ),
+        dirichlet_threshold=DirichletThreshold(weight=1.0, bias=5.0),
+        target_entropy=TargetEntropy(
+            linear=torch.tensor([1.0, 1.0, 1.0, 1.0]),
+            linear_inv_temp=torch.ones(1) * 8.0,
+            bias=0.0,
+        ),
+        outlier_topk=3,
+    )
+
+
+DEFAULT_DS_CONFIG = get_default_ds_config()
