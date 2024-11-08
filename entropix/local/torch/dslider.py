@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from typing import NamedTuple, Tuple
 from .dslider_config import EPS, MAX_TEMP, MIN_TEMP, DSConfig
-from .dslider_utils import fit_dirichlet, temp_tune
+from .dslider_utils import *
 
 
 def kl_divergence(logp: torch.Tensor, logq: torch.Tensor) -> torch.Tensor:
@@ -15,7 +15,7 @@ def kl_divergence(logp: torch.Tensor, logq: torch.Tensor) -> torch.Tensor:
 
 
 def ent_varent(logp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Compute entropy and variance from log probabilities."""
+    """Compute entropy and varentropu from log probabilities."""
     p = torch.exp(logp)
     ent = -torch.sum(p * logp, dim=-1)
     diff = logp + ent.unsqueeze(-1)
@@ -23,23 +23,22 @@ def ent_varent(logp: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return ent, varent
 
 
-def dirichlet_expectation(alpha: torch.Tensor) -> torch.Tensor:
-    """Compute the expectation E[X|X~Dir(alpha)]"""
-    alpha_sum = torch.sum(alpha, dim=-1, keepdim=True)
-    return alpha / alpha_sum
+def normalize_logits(logits: torch.Tensor, noise_floor: float) -> torch.Tensor:
+    """Normalize logits to log probabilities with numerical stability."""
+    shifted = logits - torch.max(logits, dim=-1, keepdim=True)[0]
 
+    # Normalize using log_softmax (equivalent to shifted - logsumexp)
+    normalized = torch.log_softmax(shifted + EPS, dim=-1)
 
-def sample_dirichlet(alpha: torch.Tensor) -> torch.Tensor:
-    """Sample from a Dirichlet distribution."""
-    dirichlet_dist = torch.distributions.Dirichlet(alpha)
-    return dirichlet_dist.sample()
+    # Apply noise floor
+    return torch.where(normalized < noise_floor, torch.log(torch.tensor(EPS)), normalized)
 
 
 class DSState(NamedTuple):
     """State maintained by the Adaptive Dirichlet Sampler"""
 
     emwa_dir: torch.Tensor
-    emwa_logp_dir_supp: torch.Tensor
+    emwa_logp_on_supp: torch.Tensor
     emwa_temp: torch.Tensor
     emwa_ent_scaffold: torch.Tensor
     emwa_ent_naked: torch.Tensor
@@ -51,74 +50,66 @@ class DSState(NamedTuple):
     token_cross_var_naked: torch.Tensor
     emwa_dir_ent: torch.Tensor
     emwa_topk_ent_naked: torch.Tensor
-    
+
+    def to(self, device: torch.device) -> "DSState":
+        return DSState(
+            emwa_dir=self.emwa_dir.to(device),
+            emwa_logp_on_supp=self.emwa_logp_on_supp.to(device),
+            emwa_temp=self.emwa_temp.to(device),
+            emwa_ent_scaffold=self.emwa_ent_scaffold.to(device),
+            emwa_ent_naked=self.emwa_ent_naked.to(device),
+            emwa_varent_scaffold=self.emwa_varent_scaffold.to(device),
+            emwa_varent_naked=self.emwa_varent_naked.to(device),
+            token_cross_ent_scaffold=self.token_cross_ent_scaffold.to(device),
+            token_cross_ent_naked=self.token_cross_ent_naked.to(device),
+            token_cross_var_scaffold=self.token_cross_var_scaffold.to(device),
+            token_cross_var_naked=self.token_cross_var_naked.to(device),
+            emwa_dir_ent=self.emwa_dir_ent.to(device),
+            emwa_topk_ent_naked=self.emwa_topk_ent_naked.to(device),
+        )
 
 
-def dirichlet_expected_entropy(alpha: torch.Tensor) -> torch.Tensor:
-    """Compute the expected entropy of a Dirichlet distribution."""
-    alpha_sum = torch.sum(alpha, dim=-1, keepdim=True)  # alpha_0
-    K = alpha.shape[-1]
-
-    # ln B(alpha) term
-    log_beta = torch.sum(torch.lgamma(alpha), dim=-1) - torch.lgamma(alpha_sum.squeeze(-1))
-
-    # (alpha_0 - K) * ψ(alpha_0) term
-    digamma_sum = torch.digamma(alpha_sum)
-    second_term = (alpha_sum.squeeze(-1) - K) * digamma_sum.squeeze(-1)
-
-    # -sum((alpha_j - 1) * ψ(alpha_j)) term
-    digamma_alpha = torch.digamma(alpha)
-    third_term = -torch.sum((alpha - 1) * digamma_alpha, dim=-1)
-
-    return log_beta + second_term + third_term
-
-
-def dirichlet_log_likelihood_from_logprob(logprobs: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
-    """Compute log probability of probs under Dirichlet(alpha)."""
-    return (
-        torch.sum((alpha - 1.0) * logprobs, dim=-1)
-        - torch.lgamma(torch.sum(alpha, dim=-1))
-        + torch.sum(torch.lgamma(alpha), dim=-1)
-    )
-
-
-def dirichlet_expected_varentropy(alpha: torch.Tensor) -> torch.Tensor:
-    """Compute the expected varentropy E[∑ᵢ ln(Xᵢ)² * Xᵢ] of a Dirichlet distribution."""
-    alpha_sum = torch.sum(alpha, dim=-1, keepdim=True)  # α₀
-
-    # E[Xᵢ] = αᵢ / α₀
-    expected_x = alpha / alpha_sum
-
-    # ψ(αᵢ)² + ψ₁(αᵢ) term
-    digamma_alpha = torch.digamma(alpha)
-    trigamma_alpha = torch.polygamma(1, alpha)
-    squared_plus_deriv = digamma_alpha**2 + trigamma_alpha
-
-    # Sum over dimensions: ∑ᵢ (αᵢ/α₀) * (ψ₁(αᵢ) + ψ(αᵢ)²)
-    return torch.sum(expected_x * squared_plus_deriv, dim=-1)
-
-
-def initialize_state(bsz: int, vsz: int, config: DSConfig, device, dtype=torch.float32) -> DSState:
+def initialize_state(logits: torch.Tensor, bsz: int, config: DSConfig, dtype=torch.float32) -> DSState:
     """Initialize the DSState with specified dtype."""
+    _, seqlen, _ = logits.shape
+    logprobs = normalize_logits(logits, config.noise_floor)
+    ent, varent = ent_varent(logprobs)
+    avg_ent, avg_varent = ent.mean(axis=-1), varent.mean(axis=-1)
+
+    topk_logits, topk_indices = torch.topk(logprobs, config.outlier_topk, dim=-1)
+    topk_logprobs = normalize_logits(topk_logits, config.noise_floor)
+    topk_ent, _ = ent_varent(topk_logprobs)
+    avg_topk_ent = topk_ent.mean(dim=-1)
+
+    logprobs_on_supp = normalize_logits(logits[..., config.dirichlet_support], config.noise_floor)
+    avg_logprobs_on_supp = torch.mean(logprobs_on_supp, dim=1)
+
+    initial_dir, _, _ = fit_dirichlet(avg_logprobs_on_supp)
+    avg_dir_ent = dirichlet_log_likelihood_from_logprob(logprobs_on_supp, initial_dir.unsqueeze(1)).mean(dim=-1)
+
+    topk_token_logprobs = torch.gather(logprobs, -1, topk_indices)
+    initial_cross_ent_naked = -topk_token_logprobs.mean(dim=(1, 2))
+    initial_cross_var_naked = topk_token_logprobs.var(dim=(1, 2))
     state = DSState(
-        emwa_dir=torch.ones((bsz, config.dirichlet_support.numel()), dtype=dtype, device=device),
-        emwa_logp_dir_supp=torch.zeros((bsz, config.dirichlet_support.numel()), dtype=dtype, device=device),
-        emwa_temp=torch.ones((bsz,), dtype=dtype, device=device),
-        emwa_ent_scaffold=torch.zeros((bsz,), dtype=dtype, device=device),
-        emwa_ent_naked=torch.zeros((bsz,), dtype=dtype, device=device),
-        emwa_varent_scaffold=torch.zeros((bsz,), dtype=dtype, device=device),
-        emwa_varent_naked=torch.zeros((bsz,), dtype=dtype, device=device),
-        token_cross_ent_scaffold=torch.zeros((bsz,), dtype=dtype, device=device),
-        token_cross_ent_naked=torch.zeros((bsz,), dtype=dtype, device=device),
-        token_cross_var_scaffold=torch.zeros((bsz,), dtype=dtype, device=device),
-        token_cross_var_naked=torch.zeros((bsz,), dtype=dtype, device=device),
-        emwa_dir_ent=torch.zeros((bsz,), dtype=dtype, device=device),
-        emwa_topk_ent_naked=torch.zeros((bsz,), dtype=dtype, device=device),
+        emwa_dir=initial_dir.repeat(bsz, 1),
+        emwa_logp_on_supp=avg_logprobs_on_supp.repeat(bsz, 1),
+        emwa_temp=torch.ones(bsz, dtype=dtype),
+        emwa_ent_scaffold=avg_ent.repeat(bsz),
+        emwa_ent_naked=avg_ent.repeat(bsz),
+        emwa_varent_scaffold=torch.zeros(bsz, dtype=dtype),
+        emwa_varent_naked=avg_varent.repeat(bsz),
+        token_cross_ent_scaffold=avg_ent.repeat(bsz),
+        token_cross_ent_naked=initial_cross_ent_naked.repeat(bsz),
+        token_cross_var_scaffold=torch.zeros(bsz, dtype=dtype),
+        token_cross_var_naked=initial_cross_var_naked.repeat(bsz),
+        emwa_dir_ent=avg_dir_ent.repeat(bsz),
+        emwa_topk_ent_naked=avg_topk_ent.repeat(bsz),
     )
     return state
 
 
 def adaptive_dirichlet_step(
+    key: torch.Generator,
     state: DSState,
     logits: torch.Tensor,
     config: DSConfig,
@@ -126,21 +117,17 @@ def adaptive_dirichlet_step(
 ) -> Tuple[DSState, torch.Tensor]:
     """Single step of the Adaptive Dirichlet Sampler."""
     dtype = logits.dtype
-    device = logits.device
-    bsz, _ = logits.shape
-    output_tokens = torch.zeros(bsz, dtype=torch.long, device=device)
-    EPS_tensor = torch.tensor(EPS, dtype=dtype, device=device)
-    # normalize logits
-    naked_log_probs = normalize_logits(logits)
-    # update naked entropy rate
+    bsz, vsz = logits.shape
+    output_tokens = torch.zeros(bsz, dtype=torch.int32, device=logits.device)
+    EPS = torch.tensor(1e-8, dtype=dtype, device=logits.device)
+
+    naked_log_probs = normalize_logits(logits, config.noise_floor)
+    # Update naked entropy rate
     naked_ent, naked_varent = ent_varent(naked_log_probs)
-    new_emwa_ent_naked = (
-        config.emwa_ent_naked_coeff * naked_ent + (1 - config.emwa_ent_naked_coeff) * state.emwa_ent_naked
-    )
-    new_emwa_varent_naked = (
-        config.emwa_varent_naked_coeff * naked_varent + (1 - config.emwa_varent_naked_coeff) * state.emwa_varent_naked
-    )
-    # entropy and varentropy vectors - shape (bsz, 4)
+    # Fix shape issue!
+    new_emwa_ent_naked = update_emwa(naked_ent, state.emwa_ent_naked, config.emwa_ent_naked_coeff)
+    new_emwa_varent_naked = update_emwa(naked_varent, state.emwa_varent_naked, config.emwa_varent_naked_coeff)
+    # Entropy and varentropy vectors - shape (bsz, 4)
     state_ent = torch.stack(
         [
             state.token_cross_ent_scaffold,
@@ -149,7 +136,7 @@ def adaptive_dirichlet_step(
             state.emwa_ent_naked,
         ],
         dim=1,
-    )
+    ).float()
     state_std = torch.sqrt(
         torch.stack(
             [
@@ -161,106 +148,111 @@ def adaptive_dirichlet_step(
             dim=1,
         )
     )
+    state_ent = state_ent.float()
+    naked_ent = naked_ent.float()
+    naked_varent = naked_varent.float()
     outlier_threshold = compute_outlier_threshold(state_ent, state_std, naked_ent, naked_varent, config)
     outlier_mask = outlier_threshold > 0
-    # extract topk
-    topk_logits, topk_indices = torch.topk(naked_log_probs, config.outlier_topk, dim=-1)
-    # update emwa topk entropy
-    topk_logprobs = normalize_logits(topk_logits)
+    # Update EMWA top-k entropy
+    topk_logprobs, topk_indices = torch.topk(naked_log_probs, config.outlier_topk, dim=-1)
+    topk_logprobs = normalize_logits(topk_logprobs, config.noise_floor)
     naked_topk_ent, _ = ent_varent(topk_logprobs)
-    new_emwa_topk_ent_naked = (
-        config.emwa_topk_ent_naked_coeff * naked_topk_ent
-        + (1 - config.emwa_topk_ent_naked_coeff) * state.emwa_topk_ent_naked
-    )
-    # argmax policy for concentrated inliers
+    new_emwa_topk_ent_naked = update_emwa(naked_topk_ent, state.emwa_topk_ent_naked, config.emwa_topk_ent_naked_coeff)
+    """
+    Argmax policy for concentrated inliers
+    """
     argmax_threshold = config.argmax_threshold.weight * state.emwa_topk_ent_naked + config.argmax_threshold.bias
     argmax_mask = (~outlier_mask) & (naked_topk_ent < argmax_threshold)
-    # Get indices of maximum probabilities within top-k
     argmax_indices = torch.argmax(topk_logprobs, dim=-1)
-    # Map these indices back to the original token space using topk_indices
     argmax_tokens = torch.gather(topk_indices, 1, argmax_indices.unsqueeze(1)).squeeze(1)
-    # Only use these tokens where argmax_mask is True
     output_tokens = torch.where(argmax_mask, argmax_tokens, output_tokens)
-    # topk temperature tuning policy for dispersed inliers
+    """
+    Top-k temperature tuning policy for dispersed inliers
+    """
     inlier_sampling_indices = (~outlier_mask) & (~argmax_mask)
-    # Handle less confident inliers by sampling with entropy-tuned temperature
     inlier_sampling_temp, _, _ = temp_tune(topk_logprobs, state.emwa_topk_ent_naked)
-    temp_clipped = torch.clamp(inlier_sampling_temp, MIN_TEMP, MAX_TEMP)
-    sampling_inlier_probs = torch.softmax(topk_logprobs / temp_clipped.unsqueeze(-1), dim=-1)
-    sampling_inlier_choices = torch.multinomial(sampling_inlier_probs, num_samples=1).squeeze(1)
+    # adjusted_topk_logprobs = topk_logprobs / inlier_sampling_temp.unsqueeze(1)
+    # adjusted_topk_probs = torch.softmax(adjusted_topk_logprobs, dim=-1)
+    # sampling_inlier_choices = torch.multinomial(adjusted_topk_probs, num_samples=1, generator=key).squeeze(1)
+    sampling_inlier_choices = torch.distributions.Categorical(
+        logits=topk_logprobs / inlier_sampling_temp.unsqueeze(1)
+    ).sample()
     sampling_inlier_tokens = torch.gather(topk_indices, 1, sampling_inlier_choices.unsqueeze(1)).squeeze(1)
     output_tokens = torch.where(inlier_sampling_indices, sampling_inlier_tokens, output_tokens)
-    # target entropy = affine function of state_ent and inverse emwa temperature
+    """
+    Tune temperature of outliers to match target entropy
+    """
     target_entropy = (
         torch.matmul(state_ent, config.target_entropy.linear)
         + torch.sum(config.target_entropy.linear_inv_temp / state.emwa_temp, dim=-1)
         + config.target_entropy.bias
     )
     temp, _, _ = temp_tune(naked_log_probs.float(), target_entropy)
-    # update emwa temperature
-    new_emwa_temp = config.emwa_temp_coeff * temp + (1 - config.emwa_temp_coeff) * state.emwa_temp
-    # tune temperature and update emwa logp on dirichlet support
-    temp_clipped = torch.clamp(temp, MIN_TEMP, MAX_TEMP)
-    tuned_logprobs = normalize_logits(naked_log_probs / temp_clipped.unsqueeze(-1))
-    # update emwa logp and dirichlet parameters
-    dir_support_logp = normalize_logits(tuned_logprobs[:, config.dirichlet_support])
-    new_emwa_dir, new_emwa_logp_dir_sup, kl = update_dirichlet_params(dir_support_logp, state, config)
-    # update Dirichlet entropy
-    dir_log_likelihood = dirichlet_log_likelihood_from_logprob(dir_support_logp, state.emwa_dir)
-    new_emwa_dir_ent = (
-        config.emwa_dir_ent_coeff * (-dir_log_likelihood) + (1 - config.emwa_dir_ent_coeff) * state.emwa_dir_ent
+    new_emwa_temp = update_emwa(temp, state.emwa_temp, config.emwa_temp_coeff)
+    tuned_logprobs = normalize_logits(
+        naked_log_probs / torch.clamp(temp.unsqueeze(1), MIN_TEMP, MAX_TEMP),
+        config.noise_floor,
     )
+    """
+    Update EMWA log probabilities (on Dirichlet support)
+    """
+    logprobs_on_supp = normalize_logits(tuned_logprobs[:, config.dirichlet_support], config.noise_floor)
+    kl = torch.sum(
+        torch.exp(logprobs_on_supp) * (logprobs_on_supp - state.emwa_logp_on_supp),
+        dim=-1,
+    )
+    emwa_logp_coeff = config.emwa_logp_base ** (-config.emwa_logp_exp_factor / (kl + EPS))
+    new_emwa_logp_on_supp = update_emwa(logprobs_on_supp, state.emwa_logp_on_supp, emwa_logp_coeff.unsqueeze(-1))
+    new_emwa_dir, _, _ = fit_dirichlet(new_emwa_logp_on_supp)
+    """
+    Update Dirichlet and compute threshold
+    """
+    dir_log_likelihood = dirichlet_log_likelihood_from_logprob(logprobs_on_supp, state.emwa_dir)
+    new_emwa_dir_ent = update_emwa(-dir_log_likelihood, state.emwa_dir_ent, config.emwa_dir_ent_coeff)
     dirichlet_threshold = config.dirichlet_threshold.weight * state.emwa_dir_ent + config.dirichlet_threshold.bias
     use_dirichlet = outlier_mask & (-dir_log_likelihood < dirichlet_threshold)
-    # below dirichlet threshold, interpolate and sample
-    # compute perturbation coefficient
-    dir_expectation = dirichlet_expectation(state.emwa_dir)
-    kl_div = dirichlet_expected_entropy(state.emwa_dir) - torch.sum(dir_expectation * dir_support_logp, dim=-1)
-    perturb_coeff = 1 - torch.pow(config.perturb_base_coeff, -config.perturb_exp_coeff / (kl_div + EPS_tensor))
-    # Calculate interpolated probabilities for the support tokens
-    interpolated_probs = perturb_coeff.unsqueeze(-1) * dir_expectation + (1 - perturb_coeff.unsqueeze(-1)) * torch.exp(
-        dir_support_logp
-    )
-    # For use_dirichlet case: sample from support space then map back
-    interpolated_choices = torch.argmax(interpolated_probs, dim=-1)
-    dirichlet_tokens = config.dirichlet_support[interpolated_choices]
-    output_tokens = torch.where(use_dirichlet, dirichlet_tokens, output_tokens)
-    # above dirichlet threshold you're ngmi
-    if wild:
-        # sample from random dirichlet distributed
-        sampled_probs = sample_dirichlet(new_emwa_dir.float())
-        ood_choices = torch.argmax(sampled_probs, dim=-1)
-        ood_tokens = config.dirichlet_support[ood_choices]
+    if wild:  # If wild, sample from Dirichlet, else use expectation
+        dir_probs = sample_dirichlet(new_emwa_dir.float())
     else:
-        # sample from the pure tuned logprobs
-        support_probs = torch.softmax(tuned_logprobs, dim=-1)
-        support_choices = torch.multinomial(support_probs, num_samples=1).squeeze(1)
-        ood_tokens = config.dirichlet_support[support_choices]
-    # Update output tokens where appropriate
+        dir_probs = dirichlet_expectation(new_emwa_dir.float())
+    """
+    Below Dirichlet threshold, interpolate and sample (can improve this in the future)
+    """
+    kl = torch.sum(dir_probs * (torch.log(dir_probs + EPS) - logprobs_on_supp), dim=-1)
+    perturb_coeff = 1 - torch.pow(config.perturb_base_coeff, -config.perturb_exp_coeff * (1 / (kl + EPS)))
+    interpolated_probs = perturb_coeff.unsqueeze(1) * dir_probs + (1 - perturb_coeff.unsqueeze(1)) * torch.exp(
+        logprobs_on_supp
+    )
+    # In use_dirichlet case, take argmax of the interpolated probabilities
+    dirichlet_choices = torch.argmax(interpolated_probs, dim=-1)
+    dirichlet_tokens = config.dirichlet_support[dirichlet_choices]
+    output_tokens = torch.where(use_dirichlet, dirichlet_tokens, output_tokens)
+    """
+    Above Dirichlet threshold, sample from Dirichlet
+    """
+    ood_choices = torch.multinomial(dir_probs, num_samples=1, generator=key).squeeze(1)
+    ood_tokens = config.dirichlet_support[ood_choices]
     output_tokens = torch.where(outlier_mask & ~use_dirichlet, ood_tokens, output_tokens)
-    # update scaffold entropy rate
-    scaffold_ent, scaffold_varent = ent_varent(torch.log(interpolated_probs + EPS_tensor))
-    new_emwa_ent_scaffold = (
-        config.emwa_ent_scaffold_coeff * scaffold_ent + (1 - config.emwa_ent_scaffold_coeff) * state.emwa_ent_scaffold
+    # Update scaffold entropy rate
+    scaffold_ent, scaffold_varent = ent_varent(torch.log(interpolated_probs + EPS))
+    new_emwa_ent_scaffold = update_emwa(scaffold_ent, state.emwa_ent_scaffold, config.emwa_ent_scaffold_coeff)
+    new_emwa_varent_scaffold = update_emwa(
+        scaffold_varent, state.emwa_varent_scaffold, config.emwa_varent_scaffold_coeff
     )
-    new_emwa_varent_scaffold = (
-        config.emwa_varent_scaffold_coeff * scaffold_varent
-        + (1 - config.emwa_varent_scaffold_coeff) * state.emwa_varent_scaffold
-    )
-    # update token cross entropies
-    batch_indices = torch.arange(bsz, device=device)
-    scaffold_token_logprob = torch.log(interpolated_probs[batch_indices, output_tokens] + EPS_tensor)
-    naked_token_logprob = torch.log(naked_log_probs[batch_indices, output_tokens] + EPS_tensor)
+    # Update token cross entropies
+    batch_indices = torch.arange(bsz, device=logits.device)
+    scaffold_token_logprob = torch.log(interpolated_probs[batch_indices, output_tokens] + EPS)
+    naked_token_logprob = torch.log(naked_log_probs[batch_indices, output_tokens] + EPS)
     (
         new_token_cross_ent_scaffold,
         new_token_cross_ent_naked,
         new_token_cross_var_scaffold,
         new_token_cross_var_naked,
     ) = update_token_cross_entropies(state, scaffold_token_logprob, naked_token_logprob, config)
-    # assemble new state
+    # Assemble new state
     new_state = DSState(
         emwa_dir=new_emwa_dir,
-        emwa_logp_dir_supp=new_emwa_logp_dir_sup,
+        emwa_logp_on_supp=new_emwa_logp_on_supp,
         emwa_temp=new_emwa_temp,
         emwa_ent_scaffold=new_emwa_ent_scaffold,
         emwa_ent_naked=new_emwa_ent_naked,
@@ -273,14 +265,16 @@ def adaptive_dirichlet_step(
         emwa_dir_ent=new_emwa_dir_ent,
         emwa_topk_ent_naked=new_emwa_topk_ent_naked,
     )
-    return new_state, output_tokens, kl
-
-
-def normalize_logits(logits: torch.Tensor) -> torch.Tensor:
-    """Normalize logits to log probabilities with numerical stability."""
-    shifted = logits - torch.max(logits, dim=-1, keepdim=True).values
-    log_probs = shifted - torch.logsumexp(shifted, dim=-1, keepdim=True)
-    return log_probs
+    return (
+        new_state,
+        output_tokens,
+        naked_ent,
+        naked_varent,
+        scaffold_ent,
+        scaffold_varent,
+        naked_token_logprob,
+        scaffold_token_logprob,
+    )
 
 
 def update_token_cross_entropies(
@@ -290,21 +284,21 @@ def update_token_cross_entropies(
     config: DSConfig,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Update token cross entropy statistics."""
-    token_cross_ent_scaffold = (
-        config.token_cross_ent_scaffold_coeff * (-scaffold_token_logprob)
-        + (1 - config.token_cross_ent_scaffold_coeff) * state.token_cross_ent_scaffold
-    )
     token_cross_ent_naked = (
         config.token_cross_ent_naked_coeff * (-naked_token_logprob)
         + (1 - config.token_cross_ent_naked_coeff) * state.token_cross_ent_naked
     )
-    token_cross_var_scaffold = (
-        config.token_cross_var_scaffold_coeff * (token_cross_ent_scaffold - scaffold_token_logprob) ** 2
-        + (1 - config.token_cross_var_scaffold_coeff) * state.token_cross_var_scaffold
+    token_cross_ent_scaffold = (
+        config.token_cross_ent_scaffold_coeff * (-scaffold_token_logprob)
+        + (1 - config.token_cross_ent_scaffold_coeff) * state.token_cross_ent_scaffold
     )
     token_cross_var_naked = (
         config.token_cross_var_naked_coeff * (token_cross_ent_naked - naked_token_logprob) ** 2
         + (1 - config.token_cross_var_naked_coeff) * state.token_cross_var_naked
+    )
+    token_cross_var_scaffold = (
+        config.token_cross_var_scaffold_coeff * (token_cross_ent_scaffold - scaffold_token_logprob) ** 2
+        + (1 - config.token_cross_var_scaffold_coeff) * state.token_cross_var_scaffold
     )
     return (
         token_cross_ent_scaffold,
@@ -312,6 +306,10 @@ def update_token_cross_entropies(
         token_cross_var_scaffold,
         token_cross_var_naked,
     )
+
+
+def update_emwa(new: torch.Tensor, old: torch.Tensor, coeff: float | torch.Tensor) -> torch.Tensor:
+    return coeff * new + (1 - coeff) * old
 
 
 def compute_outlier_threshold(state_ent, state_std, naked_ent, naked_varent, config):
@@ -325,9 +323,9 @@ def compute_outlier_threshold(state_ent, state_std, naked_ent, naked_varent, con
     )
 
 
-def update_dirichlet_params(dir_support_logp, state, config):
-    kl = kl_divergence(dir_support_logp, state.emwa_logp_dir_supp)
+def update_dirichlet_params(tuned_logprops_on_supp, state, config):
+    kl = kl_divergence(tuned_logprops_on_supp, state.emwa_logp_dir_supp)
     emwa_logp_coeff = (config.emwa_logp_base ** (-config.emwa_logp_exp_factor / (kl + EPS))).unsqueeze(-1)
-    new_emwa_logp_dir_sup = emwa_logp_coeff * dir_support_logp + (1 - emwa_logp_coeff) * state.emwa_logp_dir_supp
+    new_emwa_logp_dir_sup = emwa_logp_coeff * tuned_logprops_on_supp + (1 - emwa_logp_coeff) * state.emwa_logp_dir_supp
     new_dir_params, _, _ = fit_dirichlet(new_emwa_logp_dir_sup)
-    return new_dir_params, new_emwa_logp_dir_sup, kl
+    return new_dir_params, new_emwa_logp_dir_sup

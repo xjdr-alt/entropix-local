@@ -6,6 +6,7 @@ import torch.nn as nn
 MIN_TEMP = 1e-4
 MAX_TEMP = 1e4
 EPS = 1e-8
+VOCAB_SIZE = 128256
 
 
 @dataclass(frozen=True)
@@ -172,7 +173,17 @@ class DSConfig:
     # Dirichlet parameters
     perturb_base_coeff: float
     perturb_exp_coeff: float
+    """
+    dirichlet_support is a subset of the vocabulary of your model.
+    recommended tuning:
+    1. sample autoregressively conditioned on random hidden state prompts
+    2. take the empirical average of logprobs across position and prompts
+    3. the support is all logprobs lying above the noise threshold (see normalize_logits in dslider.py)
+    """
     dirichlet_support: torch.Tensor
+
+    # noise floor for logits normalization
+    noise_floor: float
 
     # Threshold parameters
     outlier_threshold: OutlierThreshold
@@ -210,6 +221,7 @@ class DSConfig:
             perturb_base_coeff=self.perturb_base_coeff,
             perturb_exp_coeff=self.perturb_exp_coeff,
             dirichlet_support=self.dirichlet_support.to(device),
+            noise_floor=self.noise_floor,
             # Threshold parameters
             outlier_threshold=self.outlier_threshold.to(device),
             argmax_threshold=self.argmax_threshold.to(device),
@@ -288,49 +300,43 @@ class DSConfig:
 
 # Default config values
 DEFAULT_DS_CONFIG = DSConfig(
-    # EMWA coefficients
-    emwa_logp_base=1.5,
-    emwa_logp_exp_factor=2.5,
-    emwa_dir_coeff=0.2,
-    emwa_temp_coeff=1,
-    emwa_dir_ent_coeff=0.15,
-    emwa_ent_scaffold_coeff=0.15,
-    emwa_varent_scaffold_coeff=0.15,
-    emwa_ent_naked_coeff=0.15,
-    emwa_varent_naked_coeff=0.15,
-    emwa_topk_ent_naked_coeff=0.15,
-    # Token cross entropy coefficients
-    token_cross_ent_scaffold_coeff=0.15,
-    token_cross_ent_naked_coeff=0.15,
-    token_cross_var_scaffold_coeff=0.15,
-    token_cross_var_naked_coeff=0.15,
-    # Dirichlet parameters
-    perturb_base_coeff=0.95,
-    perturb_exp_coeff=2.5,
-    dirichlet_support=torch.arange(128256),  # this is llama3 vocab size
+    emwa_logp_base=4.0,
+    emwa_logp_exp_factor=3.0,
+    emwa_dir_coeff=0.70,
+    emwa_temp_coeff=0.70,
+    emwa_dir_ent_coeff=0.70,
+    emwa_ent_scaffold_coeff=0.70,
+    emwa_varent_scaffold_coeff=0.70,
+    emwa_ent_naked_coeff=0.70,
+    emwa_varent_naked_coeff=0.70,
+    emwa_topk_ent_naked_coeff=0.70,
+    token_cross_ent_scaffold_coeff=0.65,
+    token_cross_ent_naked_coeff=0.65,
+    token_cross_var_scaffold_coeff=0.75,
+    token_cross_var_naked_coeff=0.65,
+    perturb_base_coeff=10.0,
+    perturb_exp_coeff=1.0,
+    dirichlet_support=torch.arange(VOCAB_SIZE),
+    noise_floor=-12.0,
     # Threshold parameters
     outlier_threshold=OutlierThreshold(
-        bilinear=torch.eye(4) * 0.15,  # Increased sensitivity
-        linear_state_ent=torch.ones(4) * 0.15,
-        linear_state_std=torch.ones(4) * 0.15,
-        linear_naked_ent=0.15,
-        linear_naked_std=0.15,
-        linear_naked_varent=0.15,
-        bias=0.1,  # Added small positive bias
+        bilinear=torch.ones((4, 4)) * 1.3,  # Increased sensitivity
+        linear_state_ent=torch.ones(4) * 0.8,
+        linear_state_std=torch.ones(4) * 0.8,
+        linear_naked_ent=1.2,
+        linear_naked_std=1.2,
+        linear_naked_varent=1.2,
+        bias=0.0,
     ),
     argmax_threshold=ArgmaxThreshold(
-        weight=1.2,  # Increased from 1.0
-        bias=0.1,  # Added small positive bias
+        weight=1.0,
+        bias=5.0,
     ),
-    dirichlet_threshold=DirichletThreshold(
-        weight=1.2,  # Increased from 1.0
-        bias=0.1,  # Added small positive bias
-    ),
+    dirichlet_threshold=DirichletThreshold(weight=1.0, bias=5.0),
     target_entropy=TargetEntropy(
-        linear=torch.ones(4) * 0.15,
-        linear_inv_temp=torch.ones(1) * 1.2,  # Increased from 1.0
-        bias=0.1,  # Added small positive bias
+        linear=torch.tensor([1.0, 1.0, 1.0, 1.0]),
+        linear_inv_temp=torch.ones(1) * 8.0,
+        bias=0.0,
     ),
-    # Token outlier parameters
-    outlier_topk=5,
+    outlier_topk=3,
 )

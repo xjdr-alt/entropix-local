@@ -2,6 +2,62 @@ import torch
 import torch.nn.functional as F
 
 
+def sample_dirichlet(alpha: torch.Tensor) -> torch.Tensor:
+    """Sample from a Dirichlet distribution."""
+    dirichlet_dist = torch.distributions.Dirichlet(alpha)
+    return dirichlet_dist.sample()
+
+
+def dirichlet_log_likelihood_from_logprob(logprobs: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
+    """Compute log probability of probs under Dirichlet(alpha)."""
+    return (
+        torch.sum((alpha - 1.0) * logprobs, dim=-1)
+        - torch.lgamma(torch.sum(alpha, dim=-1))
+        + torch.sum(torch.lgamma(alpha), dim=-1)
+    )
+
+
+def dirichlet_expectation(alpha: torch.Tensor) -> torch.Tensor:
+    """Compute the expectation E[X|X~Dir(alpha)]"""
+    alpha_sum = torch.sum(alpha, dim=-1, keepdim=True)
+    return alpha / alpha_sum
+
+
+def dirichlet_expected_entropy(alpha: torch.Tensor) -> torch.Tensor:
+    """Compute the expected entropy of a Dirichlet distribution."""
+    alpha_sum = torch.sum(alpha, dim=-1, keepdim=True)  # alpha_0
+    K = alpha.shape[-1]
+
+    # ln B(alpha) term
+    log_beta = torch.sum(torch.lgamma(alpha), dim=-1) - torch.lgamma(alpha_sum.squeeze(-1))
+
+    # (alpha_0 - K) * ψ(alpha_0) term
+    digamma_sum = torch.digamma(alpha_sum)
+    second_term = (alpha_sum.squeeze(-1) - K) * digamma_sum.squeeze(-1)
+
+    # -sum((alpha_j - 1) * ψ(alpha_j)) term
+    digamma_alpha = torch.digamma(alpha)
+    third_term = -torch.sum((alpha - 1) * digamma_alpha, dim=-1)
+
+    return log_beta + second_term + third_term
+
+
+def dirichlet_expected_varentropy(alpha: torch.Tensor) -> torch.Tensor:
+    """Compute the expected varentropy E[∑ᵢ ln(Xᵢ)² * Xᵢ] of a Dirichlet distribution."""
+    alpha_sum = torch.sum(alpha, dim=-1, keepdim=True)  # α₀
+
+    # E[Xᵢ] = αᵢ / α₀
+    expected_x = alpha / alpha_sum
+
+    # ψ(αᵢ)² + ψ₁(αᵢ) term
+    digamma_alpha = torch.digamma(alpha)
+    trigamma_alpha = torch.polygamma(1, alpha)
+    squared_plus_deriv = digamma_alpha**2 + trigamma_alpha
+
+    # Sum over dimensions: ∑ᵢ (αᵢ/α₀) * (ψ₁(αᵢ) + ψ(αᵢ)²)
+    return torch.sum(expected_x * squared_plus_deriv, dim=-1)
+
+
 def halley_update(alpha, target_values):
     """
     Compute the Halley's method update direction.
