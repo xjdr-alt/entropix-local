@@ -249,23 +249,39 @@ def visualize_sampler_metrics(entropies, varentropies, sampler_states, generated
     # Get token texts
     token_texts = [tokenizer.decode([token]) for token in generated_tokens]
     
+    # Check if sampler_states is empty or None
+    has_sampler_states = sampler_states and len(sampler_states) > 0
+    
     # Define colors for sampler states
     colors = {
         SamplerState.FLOWING: {'bg': '#ADD8E6', 'text': '#000000'},      # light blue
         SamplerState.TREADING: {'bg': '#90EE90', 'text': '#000000'},     # light green
         SamplerState.EXPLORING: {'bg': '#FF8C00', 'text': '#000000'},    # dark orange
         SamplerState.RESAMPLING: {'bg': '#FF69B4', 'text': '#000000'},   # hot pink
-        SamplerState.ADAPTIVE: {'bg': '#800080', 'text': '#FFFFFF'}      # purple
+        SamplerState.ADAPTIVE: {'bg': '#800080', 'text': '#FFFFFF'},      # purple
+        'default': {'bg': '#E6E6FA', 'text': '#000000'}                  # light purple
     }
     
     # Create unified hover text
     hover_template = (
         "Step: %{x}<br>" +
         "Value: %{y}<br>" +
-        "Token: %{customdata[0]}<br>" +
-        "State: %{customdata[1]}"
+        "Token: %{customdata[0]}"
     )
-
+    if has_sampler_states:
+        hover_template += "<br>State: %{customdata[1]}"
+    
+    # Prepare customdata based on whether we have sampler states
+    if has_sampler_states:
+        customdata = list(zip(
+            token_texts if token_texts else [''] * len(entropies),
+            [state.value for state in sampler_states]
+        ))
+    else:
+        customdata = list(zip(
+            token_texts if token_texts else [''] * len(entropies),
+            [''] * len(entropies)
+        ))
     
     # Add entropy trace
     fig.add_trace(go.Scatter(
@@ -274,10 +290,7 @@ def visualize_sampler_metrics(entropies, varentropies, sampler_states, generated
         name='Entropy',
         line=dict(color='blue'),
         yaxis='y1',
-        customdata=list(zip(
-            token_texts if token_texts else [''] * len(entropies),
-            [state.value for state in sampler_states]
-        )),
+        customdata=customdata,
         hovertemplate=hover_template
     ))
     
@@ -288,92 +301,93 @@ def visualize_sampler_metrics(entropies, varentropies, sampler_states, generated
         name='Varentropy',
         line=dict(color='red'),
         yaxis='y1',
-        customdata=list(zip(
-            token_texts if token_texts else [''] * len(varentropies),
-            [state.value for state in sampler_states]
-        )),
+        customdata=customdata,
         hovertemplate=hover_template
     ))
     
-    # Create state indicators
-    state_colors = [colors[state]['bg'] for state in sampler_states]
-    state_names = [state.value for state in sampler_states]
-    
-    # Add state indicators
-    fig.add_trace(go.Scatter(
-        x=list(range(len(sampler_states))),
-        y=[0] * len(sampler_states),
-        mode='markers',
-        marker=dict(
-            color=state_colors,
-            size=20,
-            symbol='square',
-        ),
-        customdata=list(zip(
-            token_texts if token_texts else [''] * len(sampler_states),
-            state_names
-        )),
-        hovertemplate=hover_template,
-        yaxis='y2',
-        showlegend=False,
-    ))
-    
-    # Add state legend
-    for state, color in colors.items():
+    # Only add state indicators and legend if we have sampler states
+    if has_sampler_states:
+        # Create state indicators
+        state_colors = [colors[state]['bg'] for state in sampler_states]
+        state_names = [state.value for state in sampler_states]
+        
+        # Add state indicators
         fig.add_trace(go.Scatter(
-            x=[None],
-            y=[None],
+            x=list(range(len(sampler_states))),
+            y=[0] * len(sampler_states),
             mode='markers',
             marker=dict(
-                color=color['bg'],
-                size=10,
+                color=state_colors,
+                size=20,
                 symbol='square',
             ),
-            name=state.value,
-            showlegend=True,
+            customdata=list(zip(token_texts, state_names)),
+            hovertemplate=hover_template,
+            yaxis='y2',
+            showlegend=False,
         ))
+        
+        # Add state legend
+        for state, color in colors.items():
+            if state != 'default':  # Skip the default color in the legend
+                fig.add_trace(go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode='markers',
+                    marker=dict(
+                        color=color['bg'],
+                        size=10,
+                        symbol='square',
+                    ),
+                    name=state.value,
+                    showlegend=True,
+                ))
     
-    # Update layout
-    fig.update_layout(
-        title=dict(
-            text='Entropy, Varentropy and Sampler States over Generation Steps',
-            y=0.95,  # Move title down slightly
+    # Update layout based on whether we have sampler states
+    layout_dict = {
+        'title': dict(
+            text='Entropy and Varentropy over Generation Steps',
+            y=0.95,
             x=0.5,
             xanchor='center',
             yanchor='top'
         ),
-        xaxis=dict(
+        'xaxis': dict(
             title='Generation Step',
             showticklabels=True,
             tickmode='linear',
             dtick=5
         ),
-        yaxis=dict(
+        'yaxis': dict(
             title='Value',
-            domain=[0.25, 0.95]  
+            domain=[0.25, 0.95] if has_sampler_states else [0, 1]
         ),
-        yaxis2=dict(
-            domain=[0.1, 0.2],  
+        'height': 750,
+        'showlegend': True,
+        'margin': dict(t=100)
+    }
+    
+    if has_sampler_states:
+        layout_dict['yaxis2'] = dict(
+            domain=[0.1, 0.2],
             showticklabels=False,
             range=[-0.5, 0.5]
-        ),
-        height=750,
-        showlegend=True,
-        legend=dict(
+        )
+        layout_dict['legend'] = dict(
             yanchor="top",
-            y=1.0, 
+            y=1.0,
             xanchor="right",
             x=1,
             orientation="h"
-        ),
-        margin=dict(t=100)
-    )
+        )
+    
+    fig.update_layout(**layout_dict)
     
     # Generate timestamp and save
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"entropix/results/sampler_metrics_{timestamp}.html"
 
-        # Create HTML content with the figure and text below
+    # Create HTML content with the figure and text below
     html_content = f"""
     <html>
     <head>
@@ -413,8 +427,11 @@ def visualize_sampler_metrics(entropies, varentropies, sampler_states, generated
             </div>
             <div class="text-container">
                 <h3>Generated Tokens:</h3>
-                {''.join([f'<span class="token" style="background-color: {colors[state]["bg"]}; color: {colors[state]["text"]};">{token}</span>' 
-                        for token, state in zip(token_texts, sampler_states)])}
+                {''.join([
+                    f'<span class="token" style="background-color: {colors[state]["bg"] if has_sampler_states else colors["default"]["bg"]}; '
+                    f'color: {colors[state]["text"] if has_sampler_states else colors["default"]["text"]};">{token}</span>' 
+                    for token, state in zip(token_texts, sampler_states if has_sampler_states else [None] * len(token_texts))
+                ])}
             </div>
         </div>
     </body>
@@ -428,6 +445,94 @@ def visualize_sampler_metrics(entropies, varentropies, sampler_states, generated
     
     return fig
 
+def visualize_logit_shift(original_entropy, original_varentropy, modified_entropy, modified_varentropy, generated_tokens, tokenizer):
+    # Add check at the start of the method
+    if not generated_tokens:
+        print("No tokens generated yet - skipping visualization")
+        return None
+    
+    # Ensure all arrays have the same length
+    min_length = min(len(original_entropy), len(original_varentropy), 
+                    len(modified_entropy), len(modified_varentropy),
+                    len(generated_tokens))
+    
+    # Create positions array
+    positions = np.arange(min_length)
+    
+    # Convert lists to numpy arrays for arithmetic operations
+    original_entropy = np.array(original_entropy[:min_length])
+    original_varentropy = np.array(original_varentropy[:min_length])
+    modified_entropy = np.array(modified_entropy[:min_length])
+    modified_varentropy = np.array(modified_varentropy[:min_length])
+    
+    # Create hover text
+    hover_text = [
+        f"Token: {tokenizer.decode([token]) or 'Unknown'}<br>"
+        f"Position: {i}<br>"
+        f"Original Entropy: {original_entropy[i]:.4f}<br>"
+        f"Original Varentropy: {original_varentropy[i]:.4f}<br>"
+        f"Dirichlet pull: Entropy: {modified_entropy[i]:.4f}<br>"
+        f"Dirichlet pull: Varentropy: {modified_varentropy[i]:.4f}"
+        for i, token in enumerate(generated_tokens[:min_length])
+    ]
+    
+    # Create the 3D cone plot
+    fig = go.Figure()
+    
+    # Calculate the vectors - change to represent shift from original to modified
+    u = modified_entropy - original_entropy  # Vector points from original to modified entropy
+    v = modified_varentropy - original_varentropy  # Vector points from original to modified varentropy
+    w = np.zeros_like(positions)
 
-def visualize_logit_shift():
-    pass
+    # Calculate vector magnitudes for scaling
+    magnitudes = np.sqrt(u**2 + v**2 + w**2)
+    max_magnitude = np.max(magnitudes)
+    
+    # Normalize vectors and adjust size
+    scale_factor = 0.15
+    u_normalized = u / (max_magnitude + 1e-10) * scale_factor
+    v_normalized = v / (max_magnitude + 1e-10) * scale_factor
+    w_normalized = w / (max_magnitude + 1e-10) * scale_factor
+
+    # Add cones with normalized vectors
+    fig.add_trace(go.Cone(
+        x=original_entropy,
+        y=original_varentropy,
+        z=positions,
+        u=u_normalized,
+        v=v_normalized,
+        w=w_normalized,
+        colorscale='Viridis',
+        sizemode="absolute",
+        sizeref=1, 
+        text=hover_text,
+        hoverinfo='text',
+        name='Dirichlet Logits Shift'
+    ))
+    
+    # Update layout
+    fig.update_layout(
+        scene=dict(
+            xaxis_title='Entropy',
+            yaxis_title='Varentropy',
+            zaxis_title='Token Position',
+            aspectmode='manual',
+            aspectratio=dict(x=1, y=1, z=0.8),
+            camera=dict(
+                eye=dict(x=1.2, y=1.2, z=0.6)
+            )
+        ),
+        margin=dict(l=0, r=0, b=0, t=40),
+        title='Dirichlet Logits Shift Visualization',
+        autosize=True
+    )
+    
+    # Generate timestamp for unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save the interactive plot as HTML
+    filename = f"entropix/results/logits_shift_visualization_{timestamp}.html"
+    fig.write_html(filename, include_plotlyjs=True, full_html=True)
+    print(f"Logits shift visualization saved to {filename}")
+    
+    return fig

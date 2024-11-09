@@ -162,6 +162,8 @@ class DSConfig(BaseModel):
     # Token outlier
     outlier_topk: int
 
+    noise_floor: float
+
     def __post_init__(self):
         if not isinstance(self.dirichlet_support, mx.array):
             object.__setattr__(self, 'dirichlet_support', mx.array(self.dirichlet_support, dtype = mx.int32))
@@ -252,4 +254,5 @@ DEFAULT_DS_CONFIG = DSConfig(
     ),
     # Token outlier parameters
     outlier_topk=5,
+    noise_floor=-11.5129,
 )
