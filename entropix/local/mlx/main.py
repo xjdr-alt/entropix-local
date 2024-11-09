@@ -141,7 +141,9 @@ class EntropixModel:
             'logits_varentropy': [],
             'attention_entropy': [],
             'attention_varentropy': [],
-            'kl_divergence': []
+            'kl_divergence': [],
+            'mod_logits_entropy': [],
+            'mod_logits_varentropy': []
         }
         sampler_states = []
         generated_tokens = []
@@ -160,16 +162,16 @@ class EntropixModel:
         cfg = DEFAULT_DS_CONFIG
         # Generate first token
         logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, tokens, cur_pos, freqs_cis[:seqlen], kvcache, attn_mask=attn_mask)
-        #next_token, sampler_state = sample(tokens, logits, scores, self.sampler_config, self.entropix_config, seqlen, rng_key=self.rng_key)
-        state, next_token, kl = adaptive_dirichlet_step(state, logits[:, -1], cfg)
+        state, next_token, kl, scaffold_ent, scaffold_varent = adaptive_dirichlet_step(state, logits[:, -1], cfg)
 
         # Track metrics
-        metrics = calculate_metrics(logits, scores, seqlen)
-        for key in metrics_data.keys():
+        metrics = calculate_metrics(logits, scores, cur_pos)
+        for key in ['logits_entropy', 'logits_varentropy', 'attention_entropy', 'attention_varentropy']:
             if key in metrics:
                 metrics_data[key].append(metrics[key].item())
         metrics_data['kl_divergence'].append(kl.item())
-        #sampler_states.append(sampler_state)
+        metrics_data['mod_logits_entropy'].append(scaffold_ent.item())
+        metrics_data['mod_logits_varentropy'].append(scaffold_varent.item())
         generated_tokens.append(next_token.item())
 
         # Yield first token
@@ -184,23 +186,23 @@ class EntropixModel:
         while cur_pos < max_tokens:
             cur_pos += 1
             logits, kvcache, scores, _ = xfmr(self.xfmr_weights, self.model_params, next_token, cur_pos, freqs_cis[cur_pos:cur_pos+1], kvcache)
-            #next_token, sampler_state = sample(gen_tokens, logits, scores, self.sampler_config, self.entropix_config, cur_pos, rng_key=self.rng_key)
-            state, next_token, kl = adaptive_dirichlet_step(state, logits[:, -1], cfg)
+            state, next_token, kl, scaffold_ent, scaffold_varent = adaptive_dirichlet_step(state, logits, cfg)
 
             # Track metrics
             metrics = calculate_metrics(logits, scores, cur_pos)
-            for key in metrics_data.keys():
+            for key in ['logits_entropy', 'logits_varentropy', 'attention_entropy', 'attention_varentropy']:
                 if key in metrics:
                     metrics_data[key].append(metrics[key].item())
-            #sampler_states.append(sampler_state)
             metrics_data['attention_entropy'].append(metrics['attn_entropy'].item())
             metrics_data['attention_varentropy'].append(metrics['attn_varentropy'].item())
             metrics_data['kl_divergence'].append(kl.item())
+            metrics_data['mod_logits_entropy'].append(scaffold_ent.item())
+            metrics_data['mod_logits_varentropy'].append(scaffold_varent.item())
             generated_tokens.append(next_token.item())
 
             # Update state and yield token
-            gen_tokens = mx.concatenate((gen_tokens, next_token), axis=1)
-            token_text = self.tokenizer.decode(next_token.tolist()[0])
+            gen_tokens = mx.concatenate((gen_tokens, next_token), axis=-1)
+            token_text = self.tokenizer.decode([next_token.item()])
             yield token_text
 
             if mx.any(mx.concatenate([next_token == stop_token for stop_token in stop])):
@@ -209,6 +211,7 @@ class EntropixModel:
         if debug and len(generated_tokens) > 0:  # Only show visualizations if we have data
             visualize_sampler_metrics(metrics_data['logits_entropy'], metrics_data['logits_varentropy'], sampler_states, generated_tokens, self.tokenizer)
             visualize_token_entropy_varentropy(metrics_data, generated_tokens, self.tokenizer, self.sampler_config)
+            visualize_logit_shift(metrics_data['logits_entropy'], metrics_data['logits_varentropy'],metrics_data['mod_logits_entropy'], metrics_data['mod_logits_varentropy'], generated_tokens, self.tokenizer)
 
 # Function to initialize the model (to be run once)
 def initialize_model() -> None:

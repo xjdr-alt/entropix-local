@@ -29,14 +29,14 @@ def calculate_varentropy_logsoftmax(logits: mx.array, axis: int = -1) -> Tuple[m
     return entropy, varentropy
 
 
-def calculate_metrics(logits: mx.array, attention_scores: mx.array, current_pos: mx.array) -> Dict[str, mx.array]:
+def calculate_metrics(logits: mx.array, attention_scores: mx.array, current_pos: mx.array, mod_logits: mx.array = None) -> Dict[str, mx.array]:
     logits_entropy, logits_varentropy = calculate_varentropy_logsoftmax(logits)
     attn_entropy, attn_varentropy, attention_probs = calculate_attention_varentropy(attention_scores, current_pos)
     mean_attention = mx.mean(attention_probs, axis=1)
     agreement = mx.mean(mx.abs(attention_probs - mx.expand_dims(mean_attention, 1)), axis=(1, 2))
     interaction_strength = mx.mean(mx.abs(attention_scores), axis=(1, 2, 3))
 
-    return {
+    metrics = {
         "logits_entropy": mx.mean(logits_entropy),
         "logits_varentropy": mx.mean(logits_varentropy),
         "attn_entropy": mx.mean(attn_entropy),
@@ -44,6 +44,15 @@ def calculate_metrics(logits: mx.array, attention_scores: mx.array, current_pos:
         "agreement": mx.mean(agreement),
         "interaction_strength": interaction_strength
     }
+
+    if mod_logits is not None:
+        mod_logits_entropy, mod_logits_varentropy = calculate_varentropy_logsoftmax(mod_logits)
+        metrics.update({
+            "mod_logits_entropy": mx.mean(mod_logits_entropy),
+            "mod_logits_varentropy": mx.mean(mod_logits_varentropy)
+        })
+
+    return metrics
 
 class AttnStats(NamedTuple):
     entropy: mx.array  # (bsz, n_layers, num_heads)

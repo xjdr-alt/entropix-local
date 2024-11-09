@@ -34,7 +34,7 @@ def apply_rotary_emb(xq: mx.array, xk: mx.array, freqs_cis: mx.array, dtype=mx.f
     return xq_out.astype(dtype), xk_out.astype(dtype)
 
 def attention(x: mx.array, layer_weights: LayerWeights, model_params, cur_pos: int, layer_idx: int, freqs_cis: mx.array, kvcache: KVCache, attn_mask: Optional[mx.array] = None) -> Tuple[mx.array, KVCache, mx.array]:
-    bsz, _, _ = x.shape
+    bsz = x.shape[0]
 
     n_rep = model_params.n_local_heads // model_params.n_local_kv_heads
     xq = mx.reshape(mx.matmul(x, layer_weights.wq.T), (bsz, -1, model_params.n_local_heads, model_params.head_dim))

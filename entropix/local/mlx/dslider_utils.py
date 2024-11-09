@@ -1,174 +1,308 @@
 import mlx.core as mx
-import mlx.nn as nn
+import jax
+import jax.numpy as jnp
+import jax.scipy.special as jsp
+from functools import partial
 import numpy as np
-import scipy.special as sp
-from einops.array_api import rearrange
-from typing import Tuple
 
-def halley_update(alpha, target_values):
-    """
-    Computes the Halley's method update direction.
-    """
+# Conversion utilities
+def _convert_to_jax(x):
+    """Convert MLX array to JAX array."""
+    if isinstance(x, mx.array):
+        return jnp.asarray(x)  # NumPy conversion happens implicitly
+    return x
 
-    p1 = mx.array(sp.polygamma(1, alpha))
-    p2 = mx.array(sp.polygamma(2, alpha))
+def _convert_to_mlx(x):
+    """Convert JAX array to MLX array."""
+    if isinstance(x, (jnp.ndarray, np.ndarray)):
+        return mx.array(x)
+    return x
 
-    S = mx.sum(alpha, axis = -1, keepdims = True)
-    s1 = mx.array(sp.polygamma(1, S))
-    s2 = mx.array(sp.polygamma(2, S))
+def _convert_tuple_to_mlx(t):
+    """Convert tuple of JAX arrays to tuple of MLX arrays."""
+    return tuple(_convert_to_mlx(x) for x in t)
 
-    p1_inv = 1 / p1
+# JAX implementations
+@jax.jit
+def _jax_sample_dirichlet(key, alpha):
+    gamma_samples = jax.random.gamma(key, alpha, shape=alpha.shape)
+    return gamma_samples / jnp.sum(gamma_samples, axis=-1, keepdims=True)
 
-    sum_p1_inv = mx.sum(p1_inv, axis = -1, keepdims = True)
+@jax.jit
+def _jax_dirichlet_log_likelihood_from_logprob(logprobs, alpha):
+    return (
+        jnp.sum((alpha - 1.0) * logprobs, axis=-1)
+        - jsp.gammaln(jnp.sum(alpha, axis=-1))
+        + jnp.sum(jsp.gammaln(alpha), axis=-1)
+    )
 
+@jax.jit
+def _jax_dirichlet_expectation(alpha):
+    alpha_sum = jnp.sum(alpha, axis=-1, keepdims=True)
+    return alpha / alpha_sum
+
+@jax.jit
+def _jax_dirichlet_expected_entropy(alpha):
+    alpha_sum = jnp.sum(alpha, axis=-1, keepdims=True)
+    K = alpha.shape[-1]
+    log_beta = jnp.sum(jsp.gammaln(alpha), axis=-1) - jsp.gammaln(alpha_sum.squeeze())
+    digamma_sum = jsp.digamma(alpha_sum)
+    second_term = (alpha_sum.squeeze() - K) * digamma_sum.squeeze()
+    digamma_alpha = jsp.digamma(alpha)
+    third_term = -jnp.sum((alpha - 1) * digamma_alpha, axis=-1)
+    return log_beta + second_term + third_term
+
+@jax.jit
+def _jax_dirichlet_expected_varentropy(alpha):
+    alpha_sum = jnp.sum(alpha, axis=-1, keepdims=True)
+    expected_x = alpha / alpha_sum
+    digamma_alpha = jsp.digamma(alpha)
+    trigamma_alpha = jsp.polygamma(1, alpha)
+    squared_plus_deriv = digamma_alpha**2 + trigamma_alpha
+    return jnp.sum(expected_x * squared_plus_deriv, axis=-1)
+
+@jax.jit
+def _jax_halley_update(alpha, target_values):
+    # Original halley_update implementation
+    p1 = jsp.polygamma(1, alpha)
+    p2 = jsp.polygamma(2, alpha)
+    S = jnp.sum(alpha, axis=-1, keepdims=True)
+    s1 = jsp.polygamma(1, S)
+    s2 = jsp.polygamma(2, S)
+    p1_inv = 1.0 / p1
+    sum_p1_inv = jnp.sum(p1_inv, axis=-1, keepdims=True)
     denom = 1.0 - s1 * sum_p1_inv
-
-    denom = mx.where(mx.abs(denom) < 1e-12, 1e-12, denom)
-
+    denom = jnp.where(jnp.abs(denom) < 1e-12, 1e-12, denom)
     coeff = s1 / denom
-
-    error = sp.digamma(alpha) - sp.digamma(S) - target_values
-
+    error = jsp.digamma(alpha) - jsp.digamma(S) - target_values
     temp = p1_inv * error
-
-    sum_temp = mx.sum(temp, axis = -1, keepdims = True)
-
+    sum_temp = jnp.sum(temp, axis=-1, keepdims=True)
     J_inv_error = temp + coeff * sum_temp * p1_inv
-
-    sum_J_inv_error = mx.sum(J_inv_error, axis = -1, keepdims = True)
-
+    sum_J_inv_error = jnp.sum(J_inv_error, axis=-1, keepdims=True)
     H_J_inv_error = p2 * J_inv_error - s2 * sum_J_inv_error
-
     temp2 = p1_inv * H_J_inv_error
-
-    sum_temp2 = mx.sum(temp2, axis = -1, keepdims = True)
-
+    sum_temp2 = jnp.sum(temp2, axis=-1, keepdims=True)
     J_inv_H_J_inv_error = temp2 + coeff * sum_temp2 * p1_inv
-
     return -J_inv_error + 0.5 * J_inv_H_J_inv_error
 
-def fit_dirichlet(
+@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8, 9))
+def _jax_fit_dirichlet(
     target_values,
-    init_alpha,
-    initial_lr = 1.2,
-    decay_alpha = 0.1,
-    decay_beta = 2.0,
-    decay_gamma = 0.25,
-    decay_nu = 0.75,
-    max_iters = 140,
-    tol = 1e-4,
+    init_alpha=None,
+    initial_lr=1.2,
+    decay_alpha=0.1,
+    decay_beta=2.0,
+    decay_gamma=0.25,
+    decay_nu=0.75,
+    max_iters=140,
+    tol=1e-4,
+    dtype=jnp.float32,
 ):
-    """
-    Estimate dirichlet parameters (alpha) from Target Logprobs
-    """
-
+    # Original fit_dirichlet implementation
     batch_shape = target_values.shape[:-1]
     n = target_values.shape[-1]
     min_lr = 1e-8
-
+    target_values = target_values.astype(jnp.float32)
     if init_alpha is None:
-        init_alpha = mx.ones_like(target_values)
+        init_alpha = jnp.ones((*batch_shape, n), dtype=jnp.float32)
 
-    alpha = init_alpha
-    converged = mx.zeros(batch_shape)
-    error_norm = mx.full(batch_shape, mx.inf)
-    step = mx.ones(batch_shape)
-
-    for _ in range(max_iters):
-        S = mx.sum(alpha, axis = -1, keepdims = True)
-        digamma_alpha = sp.digamma(alpha)
-        psi_S = sp.digamma(S)
+    def scan_body(carry, _):
+        alpha, converged, error_norm, step = carry
+        S = jnp.sum(alpha, axis=-1, keepdims=True)
+        digamma_alpha = jsp.digamma(alpha)
+        psi_S = jsp.digamma(S)
         error = digamma_alpha - psi_S - target_values
-        #error_norm = mx.linalg.norm(error, ord=2, axis=-1)
-
-        new_converged = mx.logical_or(converged, (mx.abs(error) < tol))
-        step_float = mx.array(step, dtype = mx.float32)
-        exp_factor = mx.exp(-decay_alpha * (step_float ** decay_nu))
-        cos_factor = mx.abs(mx.cos(decay_beta / (step_float ** decay_gamma)))
-
+        error_norm = jnp.linalg.norm(error, axis=-1)
+        new_converged = converged | (error_norm < tol)
+        exp_factor = jnp.exp(-decay_alpha * (step**decay_nu))
+        cos_factor = jnp.abs(jnp.cos(decay_beta / (step**decay_gamma)))
         lr = initial_lr * exp_factor * cos_factor
-        lr = mx.maximum(lr, mx.array(min_lr))
-        delta_alpha = halley_update(alpha, target_values)
-        scaled_delta_alpha = rearrange(lr, "v->v 1") * delta_alpha
+        lr = jnp.maximum(lr, min_lr)
+        delta_alpha = _jax_halley_update(alpha, target_values)
+        scaled_delta_alpha = lr[..., None] * delta_alpha
         max_delta = 0.5 * alpha
-        scaled_delta_alpha = mx.clip(scaled_delta_alpha, -max_delta, max_delta)
-        new_alpha = mx.where(
-            mx.expand_dims(new_converged, axis=-1),
+        scaled_delta_alpha = jnp.clip(scaled_delta_alpha, -max_delta, max_delta)
+        new_alpha = jnp.where(
+            new_converged[..., None],
             alpha,
-            mx.maximum(alpha + scaled_delta_alpha, alpha / 2)
+            jnp.maximum(alpha + scaled_delta_alpha, alpha / 2),
         )
-        alpha = new_alpha
-        converged = new_converged
-        step += 1
+        return (new_alpha, new_converged, error_norm, step + 1), None
 
-    final_alpha = alpha
-    final_step = step - 1
-    final_converged = converged
+    init_state = (
+        init_alpha,
+        jnp.zeros(batch_shape, dtype=jnp.bool_),
+        jnp.full(batch_shape, jnp.inf),
+        jnp.ones(batch_shape, dtype=jnp.int32),
+    )
+    (final_alpha, final_converged, _, final_step), _ = jax.lax.scan(
+        scan_body, init_state, None, length=max_iters
+    )
 
-    return final_alpha, final_step, final_converged
+    return final_alpha.astype(dtype), final_step - 1, final_converged
 
-def ent_grad_hess(
-    logits: mx.array,
-    T: mx.array
-) -> Tuple[mx.array, mx.array, mx.array]:
-    p = mx.softmax(logits / rearrange(T, "v->v 1"), axis = -1)
-    log_p = nn.log_softmax(logits / rearrange(T, "v->v 1"), axis = -1)
+@jax.jit
+def _jax_ent_grad_hess(logits, T):
+    p = jax.nn.softmax(logits / T[..., None], axis=-1)
+    log_p = jax.nn.log_softmax(logits / T[..., None], axis=-1)
+    mu1 = jnp.sum(p * log_p, axis=-1)
+    diff = log_p - mu1[..., None]
+    mu2 = jnp.sum(p * diff**2, axis=-1)
+    mu3 = jnp.sum(p * diff**3, axis=-1)
+    return -mu1, mu2 / T, -(2 * mu3 + 3 * mu2) / (T * T)
 
-    mu1 = mx.sum(p * log_p, axis = -1)
-    diff = log_p - rearrange(mu1, "v->v 1")
-    mu2 = mx.sum(p * diff**2, axis = -1)
-    mu3 = mx.sum(p * diff**3, axis = -1)
+@partial(jax.jit, static_argnums=(3, 4, 5, 6))
+def _jax_temp_tune(
+    logits,
+    target_ent,
+    T_init=1.0,
+    lr=0.1,
+    max_iters=10,
+    tol=1e-6,
+    dtype=jnp.bfloat16,
+):
+    # Original temp_tune implementation
+    batch_size = logits.shape[0]
+    logits = logits.astype(jnp.float32)
 
-    return -mu1, mu2/T, -(2* mu3 + 3 * mu2) / T**2
+    def scan_body(carry, _):
+        T, iters, converged = carry
+        ent, grad, hess = _jax_ent_grad_hess(logits, T)
+        error = ent - target_ent
+        new_converged = converged | (jnp.abs(error) < tol)
+        denominator = 2 * grad * grad - error * hess
+        halley_step = jnp.where(
+            jnp.abs(denominator) > 1e-8,
+            2 * error * grad / denominator,
+            jnp.full_like(T, jnp.inf),
+        )
+        newton_step = jnp.where(
+            jnp.abs(grad) > 1e-8, error / grad, jnp.full_like(T, jnp.inf)
+        )
+        grad_step = jnp.where(error > 0, lr * T, -lr * T)
+
+        delta_T = jnp.where(
+            jnp.abs(grad) < 1e-8,
+            grad_step,
+            jnp.where(jnp.abs(denominator) < 1e-8, newton_step, halley_step),
+        )
+        delta_T = jnp.clip(delta_T, -0.5 * T, 0.5 * T)
+        new_T = jnp.where(new_converged, T, jnp.maximum(T - delta_T, T / 2))
+        return (new_T, iters + 1, new_converged), None
+
+    init_state = (
+        jnp.full((batch_size,), T_init, dtype=jnp.float32),
+        jnp.zeros(batch_size, dtype=jnp.int32),
+        jnp.zeros(batch_size, dtype=jnp.bool_),
+    )
+    (final_T, final_iters, final_converged), _ = jax.lax.scan(
+        scan_body, init_state, None, length=max_iters
+    )
+    return final_T.astype(dtype), final_iters, final_converged
+
+# MLX-facing wrapper functions
+def sample_dirichlet(rng, alpha: mx.array) -> mx.array:
+    """MLX wrapper for sampling from a Dirichlet distribution."""
+    if alpha.dtype == mx.bfloat16:
+        print("I'm here 3")
+    jax_alpha = _convert_to_jax(alpha)
+    key = jax.random.PRNGKey(rng)
+    result = _jax_sample_dirichlet(key, jax_alpha)
+    return _convert_to_mlx(result)
+
+def dirichlet_log_likelihood_from_logprob(logprobs: mx.array, alpha: mx.array) -> mx.array:
+    """MLX wrapper for Dirichlet log likelihood."""
+    if logprobs.dtype == mx.bfloat16:
+        print("I'm here")
+    if alpha.dtype == mx.bfloat16:
+        print("I'm here 2")
+    jax_logprobs = _convert_to_jax(logprobs)
+    jax_alpha = _convert_to_jax(alpha)
+    result = _jax_dirichlet_log_likelihood_from_logprob(jax_logprobs, jax_alpha)
+    return _convert_to_mlx(result)
+
+def dirichlet_expectation(alpha: mx.array) -> mx.array:
+    """MLX wrapper for Dirichlet expectation."""
+    if alpha.dtype == mx.bfloat16:
+        print("I'm here 4")
+    jax_alpha = _convert_to_jax(alpha)
+    result = _jax_dirichlet_expectation(jax_alpha)
+    return _convert_to_mlx(result)
+
+def dirichlet_expected_entropy(alpha: mx.array) -> mx.array:
+    """MLX wrapper for Dirichlet expected entropy."""
+    if alpha.dtype == mx.bfloat16:
+        print("I'm here 5")
+    jax_alpha = _convert_to_jax(alpha)
+    result = _jax_dirichlet_expected_entropy(jax_alpha)
+    return _convert_to_mlx(result)
+
+def dirichlet_expected_varentropy(alpha: mx.array) -> mx.array:
+    """MLX wrapper for Dirichlet expected varentropy."""
+    if alpha.dtype == mx.bfloat16:
+        print("I'm here 6")
+    jax_alpha = _convert_to_jax(alpha)
+    result = _jax_dirichlet_expected_varentropy(jax_alpha)
+    return _convert_to_mlx(result)
+
+def fit_dirichlet(
+    target_values: mx.array,
+    init_alpha=None,
+    initial_lr=1.2,
+    decay_alpha=0.1,
+    decay_beta=2.0,
+    decay_gamma=0.25,
+    decay_nu=0.75,
+    max_iters=140,
+    tol=1e-4,
+) -> tuple[mx.array, mx.array, mx.array]:
+    """MLX wrapper for fitting Dirichlet parameters."""
+    if target_values.dtype == mx.bfloat16:
+        print("I'm here 7")
+    if init_alpha is not None and init_alpha.dtype == mx.bfloat16:
+        print("I'm here 8")
+    jax_target = _convert_to_jax(target_values)
+    jax_init_alpha = _convert_to_jax(init_alpha) if init_alpha is not None else None
+    
+    result = _jax_fit_dirichlet(
+        jax_target,
+        jax_init_alpha,
+        initial_lr,
+        decay_alpha,
+        decay_beta,
+        decay_gamma,
+        decay_nu,
+        max_iters,
+        tol,
+        dtype=jnp.float32,
+    )
+    
+    return _convert_tuple_to_mlx(result)
 
 def temp_tune(
     logits: mx.array,
     target_ent: mx.array,
-    T_init: mx.array,
+    T_init: float = 1.0,
     lr: float = 0.1,
     max_iters: int = 10,
     tol: float = 1e-6,
-) -> Tuple[mx.array, mx.array, mx.array]:
-
-    batch_size = logits.shape[0]
-    T = mx.full((batch_size,), T_init)
-    iters = mx.zeros(batch_size)
-    converged = mx.zeros(batch_size)
-
-    for _ in range(max_iters):
-        ent, grad, hess = ent_grad_hess(logits, T)
-        error = ent - target_ent
-        new_converged = mx.logical_or(converged, (mx.abs(error) < tol))
-
-        denominator = 2 * grad ** 2 - error * hess
-        halley_step = mx.where(
-            mx.abs(denominator) > 1e-8, 2 * error * grad / denominator, mx.inf
-        )
-
-        newton_step = mx.where(
-            mx.abs(grad) > 1e-8, error / grad, mx.inf
-        )
-
-        grad_step = mx.where(
-            error > 0, lr * T, -lr * T
-        )
-
-        delta_T = mx.where(
-            mx.abs(grad) < 1e-8, grad_step, mx.where(
-                mx.abs(denominator) < 1e-8, newton_step, halley_step
-            )
-        )
-
-        delta_T = mx.clip(delta_T, -0.5 * T, 0.5 * T)
-
-        new_T = mx.where(new_converged, T, mx.maximum(T - delta_T, T / 2))
-
-        T = new_T
-        iters = iters + 1
-        converged = new_converged
-
-    final_T = T
-    final_iters = iters
-    final_converged = converged
-
-    return final_T, final_iters, final_converged
+) -> tuple[mx.array, mx.array, mx.array]:
+    """MLX wrapper for temperature tuning."""
+    if logits.dtype == mx.bfloat16:
+        print("I'm here 9")
+    if target_ent.dtype == mx.bfloat16:
+        print("I'm here 10")
+    jax_logits = _convert_to_jax(logits)
+    jax_target_ent = _convert_to_jax(target_ent)
+    
+    result = _jax_temp_tune(
+        jax_logits,
+        jax_target_ent,
+        T_init,
+        lr,
+        max_iters,
+        tol,
+        dtype=jnp.bfloat16,
+    )
+    result_mlx =_convert_tuple_to_mlx(result)
+    return result_mlx
