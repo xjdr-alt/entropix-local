@@ -5,6 +5,10 @@ import jax.scipy.special as jsp
 from functools import partial
 import numpy as np
 
+# Configure JAX to use Metal backend
+jax.config.update('jax_platform_name', 'METAL')
+jax.config.update('jax_enable_x64', False)  # METAL requires float32
+
 # Conversion utilities
 def _convert_to_jax(x):
     """Convert MLX array to JAX array."""
@@ -15,20 +19,20 @@ def _convert_to_jax(x):
 def _convert_to_mlx(x):
     """Convert JAX array to MLX array."""
     if isinstance(x, (jnp.ndarray, np.ndarray)):
-        return mx.array(x)
+        return mx.array(np.array(x))  # Convert JAX array to NumPy first
     return x
 
 def _convert_tuple_to_mlx(t):
     """Convert tuple of JAX arrays to tuple of MLX arrays."""
     return tuple(_convert_to_mlx(x) for x in t)
 
-# JAX implementations
-@jax.jit
+# JAX implementations - now running on MPS
+@partial(jax.jit, backend='METAL')
 def _jax_sample_dirichlet(key, alpha):
     gamma_samples = jax.random.gamma(key, alpha, shape=alpha.shape)
     return gamma_samples / jnp.sum(gamma_samples, axis=-1, keepdims=True)
 
-@jax.jit
+@partial(jax.jit, backend='METAL')
 def _jax_dirichlet_log_likelihood_from_logprob(logprobs, alpha):
     return (
         jnp.sum((alpha - 1.0) * logprobs, axis=-1)
@@ -36,12 +40,12 @@ def _jax_dirichlet_log_likelihood_from_logprob(logprobs, alpha):
         + jnp.sum(jsp.gammaln(alpha), axis=-1)
     )
 
-@jax.jit
+@partial(jax.jit, backend='METAL')
 def _jax_dirichlet_expectation(alpha):
     alpha_sum = jnp.sum(alpha, axis=-1, keepdims=True)
     return alpha / alpha_sum
 
-@jax.jit
+@partial(jax.jit, backend='METAL')
 def _jax_dirichlet_expected_entropy(alpha):
     alpha_sum = jnp.sum(alpha, axis=-1, keepdims=True)
     K = alpha.shape[-1]
@@ -52,7 +56,7 @@ def _jax_dirichlet_expected_entropy(alpha):
     third_term = -jnp.sum((alpha - 1) * digamma_alpha, axis=-1)
     return log_beta + second_term + third_term
 
-@jax.jit
+@partial(jax.jit, backend='METAL')
 def _jax_dirichlet_expected_varentropy(alpha):
     alpha_sum = jnp.sum(alpha, axis=-1, keepdims=True)
     expected_x = alpha / alpha_sum
@@ -61,7 +65,7 @@ def _jax_dirichlet_expected_varentropy(alpha):
     squared_plus_deriv = digamma_alpha**2 + trigamma_alpha
     return jnp.sum(expected_x * squared_plus_deriv, axis=-1)
 
-@jax.jit
+@partial(jax.jit, backend='METAL')
 def _jax_halley_update(alpha, target_values):
     # Original halley_update implementation
     p1 = jsp.polygamma(1, alpha)
@@ -85,7 +89,20 @@ def _jax_halley_update(alpha, target_values):
     J_inv_H_J_inv_error = temp2 + coeff * sum_temp2 * p1_inv
     return -J_inv_error + 0.5 * J_inv_H_J_inv_error
 
-@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8, 9))
+@partial(jax.jit, backend='METAL')
+def _jax_ent_grad_hess(logits, T):
+    p = jax.nn.softmax(logits / T[..., None], axis=-1)
+    log_p = jax.nn.log_softmax(logits / T[..., None], axis=-1)
+    mu1 = jnp.sum(p * log_p, axis=-1)
+    diff = log_p - mu1[..., None]
+    mu2 = jnp.sum(p * diff**2, axis=-1)
+    mu3 = jnp.sum(p * diff**3, axis=-1)
+    return -mu1, mu2 / T, -(2 * mu3 + 3 * mu2) / (T * T)
+
+# The fit_dirichlet and temp_tune functions remain largely the same,
+# but we'll add the MPS backend specification to their scan operations
+
+@partial(jax.jit, static_argnums=(2, 3, 4, 5, 6, 7, 8, 9), backend='METAL')
 def _jax_fit_dirichlet(
     target_values,
     init_alpha=None,
@@ -141,17 +158,7 @@ def _jax_fit_dirichlet(
 
     return final_alpha.astype(dtype), final_step - 1, final_converged
 
-@jax.jit
-def _jax_ent_grad_hess(logits, T):
-    p = jax.nn.softmax(logits / T[..., None], axis=-1)
-    log_p = jax.nn.log_softmax(logits / T[..., None], axis=-1)
-    mu1 = jnp.sum(p * log_p, axis=-1)
-    diff = log_p - mu1[..., None]
-    mu2 = jnp.sum(p * diff**2, axis=-1)
-    mu3 = jnp.sum(p * diff**3, axis=-1)
-    return -mu1, mu2 / T, -(2 * mu3 + 3 * mu2) / (T * T)
-
-@partial(jax.jit, static_argnums=(3, 4, 5, 6))
+@partial(jax.jit, static_argnums=(3, 4, 5, 6), backend='METAL')
 def _jax_temp_tune(
     logits,
     target_ent,
@@ -159,7 +166,7 @@ def _jax_temp_tune(
     lr=0.1,
     max_iters=10,
     tol=1e-6,
-    dtype=jnp.bfloat16,
+    dtype=jnp.float32,
 ):
     # Original temp_tune implementation
     batch_size = logits.shape[0]
@@ -201,10 +208,8 @@ def _jax_temp_tune(
     return final_T.astype(dtype), final_iters, final_converged
 
 # MLX-facing wrapper functions
-def sample_dirichlet(rng, alpha: mx.array) -> mx.array:
+def sample_dirichlet(rng: int, alpha: mx.array) -> mx.array:
     """MLX wrapper for sampling from a Dirichlet distribution."""
-    if alpha.dtype == mx.bfloat16:
-        print("I'm here 3")
     jax_alpha = _convert_to_jax(alpha)
     key = jax.random.PRNGKey(rng)
     result = _jax_sample_dirichlet(key, jax_alpha)
@@ -212,10 +217,6 @@ def sample_dirichlet(rng, alpha: mx.array) -> mx.array:
 
 def dirichlet_log_likelihood_from_logprob(logprobs: mx.array, alpha: mx.array) -> mx.array:
     """MLX wrapper for Dirichlet log likelihood."""
-    if logprobs.dtype == mx.bfloat16:
-        print("I'm here")
-    if alpha.dtype == mx.bfloat16:
-        print("I'm here 2")
     jax_logprobs = _convert_to_jax(logprobs)
     jax_alpha = _convert_to_jax(alpha)
     result = _jax_dirichlet_log_likelihood_from_logprob(jax_logprobs, jax_alpha)
@@ -223,24 +224,18 @@ def dirichlet_log_likelihood_from_logprob(logprobs: mx.array, alpha: mx.array) -
 
 def dirichlet_expectation(alpha: mx.array) -> mx.array:
     """MLX wrapper for Dirichlet expectation."""
-    if alpha.dtype == mx.bfloat16:
-        print("I'm here 4")
     jax_alpha = _convert_to_jax(alpha)
     result = _jax_dirichlet_expectation(jax_alpha)
     return _convert_to_mlx(result)
 
 def dirichlet_expected_entropy(alpha: mx.array) -> mx.array:
     """MLX wrapper for Dirichlet expected entropy."""
-    if alpha.dtype == mx.bfloat16:
-        print("I'm here 5")
     jax_alpha = _convert_to_jax(alpha)
     result = _jax_dirichlet_expected_entropy(jax_alpha)
     return _convert_to_mlx(result)
 
 def dirichlet_expected_varentropy(alpha: mx.array) -> mx.array:
     """MLX wrapper for Dirichlet expected varentropy."""
-    if alpha.dtype == mx.bfloat16:
-        print("I'm here 6")
     jax_alpha = _convert_to_jax(alpha)
     result = _jax_dirichlet_expected_varentropy(jax_alpha)
     return _convert_to_mlx(result)
@@ -257,10 +252,6 @@ def fit_dirichlet(
     tol=1e-4,
 ) -> tuple[mx.array, mx.array, mx.array]:
     """MLX wrapper for fitting Dirichlet parameters."""
-    if target_values.dtype == mx.bfloat16:
-        print("I'm here 7")
-    if init_alpha is not None and init_alpha.dtype == mx.bfloat16:
-        print("I'm here 8")
     jax_target = _convert_to_jax(target_values)
     jax_init_alpha = _convert_to_jax(init_alpha) if init_alpha is not None else None
     
@@ -288,10 +279,6 @@ def temp_tune(
     tol: float = 1e-6,
 ) -> tuple[mx.array, mx.array, mx.array]:
     """MLX wrapper for temperature tuning."""
-    if logits.dtype == mx.bfloat16:
-        print("I'm here 9")
-    if target_ent.dtype == mx.bfloat16:
-        print("I'm here 10")
     jax_logits = _convert_to_jax(logits)
     jax_target_ent = _convert_to_jax(target_ent)
     
@@ -302,7 +289,7 @@ def temp_tune(
         lr,
         max_iters,
         tol,
-        dtype=jnp.bfloat16,
+        dtype=jnp.float32,
     )
     result_mlx =_convert_tuple_to_mlx(result)
     return result_mlx

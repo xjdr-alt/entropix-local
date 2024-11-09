@@ -479,9 +479,9 @@ def visualize_logit_shift(original_entropy, original_varentropy, modified_entrop
     # Create the 3D cone plot
     fig = go.Figure()
     
-    # Calculate the vectors
-    u = modified_entropy
-    v = modified_varentropy
+    # Calculate the vectors - change to represent shift from original to modified
+    u = modified_entropy - original_entropy  # Vector points from original to modified entropy
+    v = modified_varentropy - original_varentropy  # Vector points from original to modified varentropy
     w = np.zeros_like(positions)
 
     # Calculate vector magnitudes for scaling
@@ -489,7 +489,7 @@ def visualize_logit_shift(original_entropy, original_varentropy, modified_entrop
     max_magnitude = np.max(magnitudes)
     
     # Normalize vectors and adjust size
-    scale_factor = 0.17 
+    scale_factor = 0.15
     u_normalized = u / (max_magnitude + 1e-10) * scale_factor
     v_normalized = v / (max_magnitude + 1e-10) * scale_factor
     w_normalized = w / (max_magnitude + 1e-10) * scale_factor
@@ -504,7 +504,7 @@ def visualize_logit_shift(original_entropy, original_varentropy, modified_entrop
         w=w_normalized,
         colorscale='Viridis',
         sizemode="absolute",
-        sizeref=0.7, 
+        sizeref=1, 
         text=hover_text,
         hoverinfo='text',
         name='Dirichlet Logits Shift'
